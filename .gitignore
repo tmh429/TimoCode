@@ -7,6 +7,7 @@
 # Local development plan and learning notes
 /PLAN.md
 /docs/phase-*.md
+/tests/
 
 # Python caches and build outputs
 __pycache__/
