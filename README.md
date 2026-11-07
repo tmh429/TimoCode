@@ -4,9 +4,7 @@
 
 ## 当前进度
 
-Phase 0.1，环境与测试基线。当前包提供最小安装入口，CLI 在 Phase 5 实现。
-
-完整路线及协作约定见 [PLAN.md](PLAN.md)。
+当前已建立可安装的 Python 包和测试基线，后续逐步接入模型、工具和终端交互。计划中的 CLI 命令为 `timo`。
 
 ## 环境准备
 
@@ -41,5 +39,4 @@ src/timocode/__init__.py  Python 包入口
 tests/test_package.py    安装与导入冒烟测试
 pyproject.toml           构建、依赖和测试配置
 .env.example             环境变量模板
-PLAN.md                  开发计划与协作约定
 ```

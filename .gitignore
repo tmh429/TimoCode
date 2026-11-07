@@ -4,6 +4,10 @@
 .env.*
 !.env.example
 
+# Local development plan and learning notes
+/PLAN.md
+/docs/phase-*.md
+
 # Python caches and build outputs
 __pycache__/
 *.py[cod]
