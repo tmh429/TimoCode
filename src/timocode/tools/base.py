@@ -1,4 +1,4 @@
-"""工具描述与执行入口，完整注册和权限系统在 Phase 2 扩展。"""
+"""工具描述、执行入口与统一结果，供 Registry 和具体工具使用。"""
 
 from typing import Protocol
 

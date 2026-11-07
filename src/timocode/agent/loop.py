@@ -28,7 +28,8 @@ from timocode.llm.schemas import (
     Usage,
     UserMessage,
 )
-from timocode.tools.base import Tool, ToolResult
+from timocode.tools.base import Tool
+from timocode.tools.registry import ToolRegistry
 
 
 EventHandler = Callable[[AgentEvent], Awaitable[None]]
@@ -52,16 +53,12 @@ class Agent:
             raise ValueError("max_iterations 必须为正整数")
         if max_tokens is not None and (isinstance(max_tokens, bool) or not isinstance(max_tokens, int) or max_tokens < 1):
             raise ValueError("max_tokens 必须为正整数")
-        definitions = [tool.definition for tool in tools]
-        if len({item.name for item in definitions}) != len(definitions):
-            raise ValueError("工具名称不能重复")
         self.provider = provider
         self.model = model
         self.max_iterations = max_iterations
         self.max_tokens = max_tokens
         self.on_event = on_event
-        self._definitions = [item.model_copy(deep=True) for item in definitions]
-        self._tools = dict(zip((item.name for item in definitions), tools))
+        self._registry = ToolRegistry(tools)
         self._state = AgentState(messages=[SystemMessage(content=system_prompt)])
         self._executing_call_id: str | None = None
 
@@ -81,7 +78,7 @@ class Agent:
         request = LLMRequest(
             model=self.model,
             messages=copy.deepcopy(self._state.messages),
-            tools=copy.deepcopy(self._definitions),
+            tools=self._registry.definitions(),
             max_tokens=self.max_tokens,
         )
         response = None
@@ -114,18 +111,8 @@ class Agent:
 
     async def _execute(self, call: ToolCall) -> None:
         await self._emit(AgentEvent(type="tool_start", tool_call=call))
-        try:
-            tool = self._tools.get(call.name)
-            if tool is None:
-                raise ValueError(f"工具 {call.name} 未注册")
-            self._executing_call_id = call.id
-            result = await tool.execute(copy.deepcopy(call.arguments))
-            result = ToolResult.model_validate(result.model_dump())
-        except Exception as error:
-            result = ToolResult(
-                content=json.dumps({"error": f"{type(error).__name__}: {error}"}, ensure_ascii=False),
-                is_error=True,
-            )
+        self._executing_call_id = call.id
+        result = await self._registry.execute(call)
         self._executing_call_id = None
         message = ToolMessage(
             tool_call_id=call.id,
