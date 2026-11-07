@@ -1,0 +1,13 @@
+# Local environment and credentials
+.venv/
+.env
+.env.*
+!.env.example
+
+# Python caches and build outputs
+__pycache__/
+*.py[cod]
+.pytest_cache/
+*.egg-info/
+build/
+dist/
