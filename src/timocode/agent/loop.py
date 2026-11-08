@@ -8,6 +8,7 @@ from contextlib import aclosing
 
 from pydantic import ValidationError
 
+from timocode.agent.context import ContextBudget, ContextBuilder, TokenEstimator
 from timocode.agent.state import AgentEvent, AgentState, RunResult, RunStatus
 from timocode.llm.base import (
     LLMProvider,
@@ -48,6 +49,8 @@ class Agent:
         max_tokens: int | None = None,
         on_event: EventHandler | None = None,
         initial_messages: Sequence[Message] | None = None,
+        context_budget: ContextBudget | None = None,
+        token_estimator: TokenEstimator | None = None,
     ):
         if not model.strip():
             raise ValueError("模型名称不能为空")
@@ -55,6 +58,7 @@ class Agent:
             raise ValueError("max_iterations 必须为正整数")
         if max_tokens is not None and (isinstance(max_tokens, bool) or not isinstance(max_tokens, int) or max_tokens < 1):
             raise ValueError("max_tokens 必须为正整数")
+        self._context = ContextBuilder(context_budget, token_estimator)
         self.provider = provider
         self.model = model
         self.max_iterations = max_iterations
@@ -81,13 +85,7 @@ class Agent:
         self._state.messages.append(message)
         await self._emit(AgentEvent(type="message_complete", message=message, response=response))
 
-    async def _request_response(self) -> LLMResponse:
-        request = LLMRequest(
-            model=self.model,
-            messages=copy.deepcopy(self._state.messages),
-            tools=self._registry.definitions(),
-            max_tokens=self.max_tokens,
-        )
+    async def _request_response(self, request: LLMRequest) -> LLMResponse:
         response = None
         async with aclosing(self.provider.stream(request)) as stream:
             async for event in stream:
@@ -161,6 +159,7 @@ class Agent:
             iterations=self._state.iterations,
             usage=copy.deepcopy(usage),
             error=error,
+            context_report=copy.deepcopy(self._state.context_report),
         )
         await self._emit(AgentEvent(type="run_end", result=result, reason=status))
         return result
@@ -183,15 +182,26 @@ class Agent:
             raise RuntimeError("上次工具执行中断，需要核查副作用并建立新的 Agent")
         self._state.is_running = True
         self._state.iterations = 0
+        self._state.context_report = None
         usage: list[Usage] = []
         try:
             await self._emit(AgentEvent(type="run_start"))
             if message is not None:
                 await self._record(message)
             for _ in range(self.max_iterations):
+                request, report = self._context.build(LLMRequest(
+                    model=self.model, messages=self._state.messages,
+                    tools=self._registry.definitions(), max_tokens=self.max_tokens,
+                ))
+                self._state.context_report = report
+                await self._emit(AgentEvent(type="context_checked", context_report=report))
+                if not report.fits:
+                    return await self._finish(
+                        "context_limit", usage, "估算输入超过上下文预算，请检查上下文配置",
+                    )
                 await self._emit(AgentEvent(type="model_request_start"))
                 self._state.iterations += 1
-                response = await self._request_response()
+                response = await self._request_response(request)
                 usage.append(response.usage)
                 await self._record(response.message, response=response)
                 if response.stop_reason == "length":

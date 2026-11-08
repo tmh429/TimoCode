@@ -5,6 +5,7 @@ import asyncio
 import sys
 from pathlib import Path
 
+from timocode.agent.context import ContextBudget
 from timocode.agent.loop import DEFAULT_SYSTEM_PROMPT
 from timocode.agent.session import SessionError, SessionStore
 from timocode.agent.session_runtime import AgentSession
@@ -18,7 +19,11 @@ from timocode.security.workspace import Workspace
 
 
 async def render(event: AgentEvent) -> None:
-    if event.type == "text_delta":
+    if event.type == "context_checked":
+        report = event.context_report
+        limit = "未设上限" if report.input_limit is None else str(report.input_limit)
+        print(f"[context estimate] input~{report.estimate.total}, limit={limit}, method={report.estimate.method}", flush=True)
+    elif event.type == "text_delta":
         print(event.delta, end="", flush=True)
     elif event.type == "tool_start":
         print(f"\n[tool] {event.tool_call.name}", flush=True)
@@ -31,11 +36,24 @@ async def run_demo(
     prompt: str | None, max_iterations: int, max_tokens: int | None,
     workspace: Path | None = None, resume_id: str | None = None,
     sessions_dir: Path = Path(".timocode/sessions"),
+    context_window: int | None = None, reserve_output_tokens: int | None = None,
+    safety_margin_tokens: int | None = None,
 ) -> int:
+    if context_window is None and (reserve_output_tokens is not None or safety_margin_tokens is not None):
+        raise ValueError("设置输出预留或安全余量时必须指定 --context-window")
+    budget = None
+    if context_window is not None:
+        budget = ContextBudget(
+            context_window=context_window,
+            reserve_output_tokens=1024 if reserve_output_tokens is None else reserve_output_tokens,
+            safety_margin_tokens=256 if safety_margin_tokens is None else safety_margin_tokens,
+        )
     settings = load_settings()
     store = SessionStore(sessions_dir)
     snapshot = await store.load(resume_id) if resume_id is not None else None
     if snapshot is not None:
+        if budget is not None and budget != snapshot.header.context_budget:
+            raise ValueError("指定预算与会话保存配置不一致，恢复时请使用原配置或省略预算参数")
         root = Path(snapshot.header.cwd)
         if workspace is not None and workspace.resolve(strict=True) != root:
             raise ValueError("指定工作目录与会话保存目录不一致")
@@ -58,7 +76,7 @@ async def run_demo(
         if resume_id is None:
             session = await AgentSession.create(
                 provider, settings.model, root, store=store, tools=tools,
-                system_prompt=prompt_rules, max_iterations=max_iterations,
+                system_prompt=prompt_rules, max_iterations=max_iterations, context_budget=budget,
                 max_tokens=max_tokens, on_event=render,
             )
         else:
@@ -84,13 +102,17 @@ def main() -> int:
     parser.add_argument("--workspace", type=Path, help="启用 Coding Tools 并授权指定工作目录")
     parser.add_argument("--resume", dest="resume_id", help="恢复指定会话 ID")
     parser.add_argument("--sessions-dir", type=Path, default=Path(".timocode/sessions"), help="会话文件目录")
+    parser.add_argument("--context-window", type=int, help="上下文窗口 Token 数，显式指定后启用预算限制")
+    parser.add_argument("--reserve-output-tokens", type=int, help="预留输出 Token，默认 1024")
+    parser.add_argument("--safety-margin-tokens", type=int, help="安全余量 Token，默认 256")
     args = parser.parse_args()
     if args.prompt is None and args.resume_id is None:
         parser.error("需要任务内容或 --resume")
     try:
         return asyncio.run(run_demo(
             args.prompt, args.max_iterations, args.max_tokens, args.workspace,
-            args.resume_id, args.sessions_dir,
+            args.resume_id, args.sessions_dir, args.context_window,
+            args.reserve_output_tokens, args.safety_margin_tokens,
         ))
     except KeyboardInterrupt:
         print("\n运行已取消。", file=sys.stderr)

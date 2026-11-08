@@ -3,11 +3,12 @@
 from dataclasses import dataclass, field
 from typing import Literal
 
+from timocode.agent.context import ContextReport
 from timocode.llm.base import ToolCallDelta
 from timocode.llm.schemas import DataModel, LLMResponse, Message, ToolCall, Usage
 
 
-RunStatus = Literal["completed", "max_iterations", "provider_error", "invalid_response", "storage_error"]
+RunStatus = Literal["completed", "max_iterations", "provider_error", "invalid_response", "storage_error", "context_limit"]
 
 
 class RunResult(DataModel):
@@ -16,6 +17,7 @@ class RunResult(DataModel):
     iterations: int
     usage: list[Usage]
     error: str | None = None
+    context_report: ContextReport | None = None
 
 
 @dataclass
@@ -24,12 +26,13 @@ class AgentState:
     iterations: int = 0
     is_running: bool = False
     needs_recovery: bool = False
+    context_report: ContextReport | None = None
 
 
 @dataclass(frozen=True)
 class AgentEvent:
     type: Literal[
-        "run_start", "model_request_start", "text_delta", "tool_call_delta",
+        "run_start", "context_checked", "model_request_start", "text_delta", "tool_call_delta",
         "message_complete", "tool_start", "tool_end", "run_end",
     ]
     message: Message | None = None
@@ -39,3 +42,4 @@ class AgentEvent:
     result: RunResult | None = None
     reason: str | None = None
     response: LLMResponse | None = None
+    context_report: ContextReport | None = None

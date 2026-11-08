@@ -4,6 +4,7 @@ import asyncio
 from collections.abc import Sequence
 from pathlib import Path
 
+from timocode.agent.context import ContextBudget, TokenEstimator
 from timocode.agent.loop import Agent, DEFAULT_SYSTEM_PROMPT, EventHandler
 from timocode.agent.session import (
     SessionConflictError, SessionError, SessionRecoveryRequired,
@@ -20,6 +21,7 @@ class AgentSession:
         self, provider: LLMProvider, store: SessionStore, snapshot: SessionSnapshot,
         *, tools: Sequence[Tool] = (), max_iterations: int = 8,
         max_tokens: int | None = None, on_event: EventHandler | None = None,
+        token_estimator: TokenEstimator | None = None,
     ):
         if snapshot.header.model is None:
             raise ValueError("会话缺少模型名称")
@@ -30,6 +32,7 @@ class AgentSession:
         self.store = store
         self._snapshot = snapshot.model_copy(deep=True)
         self._header = snapshot.header.model_copy(deep=True)
+        self._token_estimator = token_estimator
         self._provider = provider
         self._tools = tuple(tools)
         self._max_iterations = max_iterations
@@ -46,11 +49,19 @@ class AgentSession:
         *, store: SessionStore | None = None, tools: Sequence[Tool] = (),
         system_prompt: str = DEFAULT_SYSTEM_PROMPT, max_iterations: int = 8,
         max_tokens: int | None = None, on_event: EventHandler | None = None,
+        token_estimator: TokenEstimator | None = None,
+        context_budget: ContextBudget | None = None,
     ) -> "AgentSession":
         store = store if store is not None else SessionStore()
-        snapshot = await store.create(cwd, model=model, tool_names=[tool.definition.name for tool in tools])
+        snapshot = await store.create(
+            cwd, model=model, tool_names=[tool.definition.name for tool in tools],
+            context_budget=context_budget,
+        )
         snapshot = await store.append(snapshot.header.id, SystemMessage(content=system_prompt), expected_sequence=0)
-        return cls(provider, store, snapshot, tools=tools, max_iterations=max_iterations, max_tokens=max_tokens, on_event=on_event)
+        return cls(
+            provider, store, snapshot, tools=tools, max_iterations=max_iterations,
+            max_tokens=max_tokens, on_event=on_event, token_estimator=token_estimator,
+        )
 
     @classmethod
     async def resume(
@@ -58,13 +69,17 @@ class AgentSession:
         *, store: SessionStore | None = None, tools: Sequence[Tool] = (),
         expected_cwd: str | Path | None = None, max_iterations: int = 8,
         max_tokens: int | None = None, on_event: EventHandler | None = None,
+        token_estimator: TokenEstimator | None = None,
     ) -> "AgentSession":
         store = store if store is not None else SessionStore()
         snapshot = await store.load(session_id)
         cls._require_ready(snapshot)
         if expected_cwd is not None and Path(expected_cwd).resolve(strict=True) != Path(snapshot.header.cwd):
             raise ValueError("授权工作目录与会话保存目录不一致")
-        return cls(provider, store, snapshot, tools=tools, max_iterations=max_iterations, max_tokens=max_tokens, on_event=on_event)
+        return cls(
+            provider, store, snapshot, tools=tools, max_iterations=max_iterations,
+            max_tokens=max_tokens, on_event=on_event, token_estimator=token_estimator,
+        )
 
     @staticmethod
     def _require_ready(snapshot: SessionSnapshot) -> None:
@@ -96,6 +111,7 @@ class AgentSession:
             self._provider, self._header.model, tools=self._tools,
             initial_messages=self._snapshot.messages, max_iterations=self._max_iterations,
             max_tokens=self._max_tokens, on_event=self._handle_event,
+            context_budget=self._header.context_budget, token_estimator=self._token_estimator,
         )
 
     async def _reload(self) -> None:
@@ -151,10 +167,11 @@ class AgentSession:
             raise
         except (SessionError, OSError) as error:
             iterations = self._agent.state.iterations if started else 0
+            report = self._agent.state.context_report if started else None
             await self._reload_after_failure()
             result = RunResult(
                 status="storage_error", messages=self._snapshot.messages,
-                iterations=iterations, usage=self._observed_usage, error=str(error),
+                iterations=iterations, usage=self._observed_usage, error=str(error), context_report=report,
             )
             await self._handle_event(AgentEvent(type="run_end", reason="storage_error", result=result.model_copy(deep=True)))
             return result
