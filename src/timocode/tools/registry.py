@@ -84,6 +84,8 @@ class ToolRegistry:
         # 后续权限检查将在参数校验之后、具体工具执行之前接入。
         try:
             result = await entry.tool.execute(arguments)
+        except PermissionError as error:
+            return _error_result("permission_denied", str(error))
         except Exception as error:
             return _error_result("execution_error", f"{type(error).__name__}: {error}")
         if not isinstance(result, ToolResult):
