@@ -1,7 +1,9 @@
 """通过 HTTPX 消费 OpenAI-compatible Chat Completions 的 SSE 流。"""
 
+import asyncio
 import json
 from collections.abc import AsyncGenerator, AsyncIterator
+from contextlib import aclosing
 from dataclasses import dataclass
 from typing import Literal, Self
 
@@ -11,12 +13,15 @@ from pydantic import BaseModel, ConfigDict, Field
 from timocode.llm.base import (
     LLMEvent,
     ProviderError,
+    ProviderConnectionError,
+    ProviderHTTPError,
     ProviderProtocolError,
     ResponseComplete,
     TextDelta,
     ToolCallDelta,
 )
 from timocode.llm.config import LLMSettings
+from timocode.llm.retry import parse_retry_after
 from timocode.llm.schemas import (
     AssistantMessage,
     LLMRequest,
@@ -140,11 +145,29 @@ class OpenAICompatibleProvider:
             await self._client.aclose()
 
     async def stream(self, request: LLMRequest) -> AsyncGenerator[LLMEvent, None]:
+        payload = _request_payload(request)
+        policy = self.settings.retry_policy.model_copy(deep=True)
+        for attempt in range(policy.max_retries + 1):
+            emitted = False
+            try:
+                async with aclosing(self._stream_once(payload)) as stream:
+                    async for event in stream:
+                        emitted = True
+                        yield event
+                return
+            except (ProviderHTTPError, ProviderConnectionError) as error:
+                delay = policy.delay(attempt, error)
+                if emitted or delay is None:
+                    raise
+            await asyncio.sleep(delay)
+
+    async def _stream_once(self, request_payload: dict) -> AsyncGenerator[LLMEvent, None]:
         text_parts: list[str] = []
         tool_parts: dict[int, _ToolParts] = {}
         finish_reason: str | None = None
         usage = Usage()
         received_done = False
+        received_response = False
 
         try:
             async with self._client.stream(
@@ -154,11 +177,15 @@ class OpenAICompatibleProvider:
                     "Authorization": "Bearer " + self.settings.api_key.get_secret_value(),
                     "Accept": "text/event-stream",
                 },
-                json=_request_payload(request),
+                json=request_payload,
                 timeout=self.settings.timeout,
             ) as response:
+                received_response = True
                 if response.status_code >= 400:
-                    raise ProviderError(f"模型服务返回 HTTP {response.status_code}")
+                    raise ProviderHTTPError(
+                        response.status_code,
+                        retry_after=parse_retry_after(response.headers.get("retry-after")),
+                    )
                 if "text/event-stream" not in response.headers.get("content-type", "").lower():
                     raise ProviderProtocolError("模型服务未返回 SSE 事件流")
 
@@ -203,6 +230,10 @@ class OpenAICompatibleProvider:
                             arguments_delta=fragment.function.arguments or "",
                         )
                     finish_reason = choice.finish_reason
+        except (httpx.ConnectTimeout, httpx.PoolTimeout):
+            raise ProviderConnectionError("模型连接或等待连接池超时", retryable=not received_response) from None
+        except httpx.ConnectError:
+            raise ProviderConnectionError("模型请求连接失败", retryable=not received_response) from None
         except httpx.TimeoutException:
             raise ProviderError("模型请求超时") from None
         except httpx.HTTPError:

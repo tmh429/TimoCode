@@ -8,6 +8,7 @@ from dotenv import dotenv_values
 from pydantic import Field, SecretStr, ValidationError, field_validator
 
 from timocode.llm.schemas import DataModel
+from timocode.llm.retry import RetryPolicy
 
 
 class LLMSettings(DataModel):
@@ -15,6 +16,7 @@ class LLMSettings(DataModel):
     base_url: str = "https://api.openai.com/v1"
     model: str = Field(min_length=1)
     timeout: float = Field(default=60.0, gt=0)
+    retry_policy: RetryPolicy = Field(default_factory=RetryPolicy)
 
     @field_validator("api_key")
     @classmethod
@@ -61,6 +63,15 @@ def load_settings(env_file: str | Path = ".env") -> LLMSettings:
         value = os.environ.get(name, local.get(name))
         if value is not None:
             values[field] = value
+    timeout = os.environ.get("OPENAI_TIMEOUT", local.get("OPENAI_TIMEOUT"))
+    retries = os.environ.get("OPENAI_MAX_RETRIES", local.get("OPENAI_MAX_RETRIES"))
+    try:
+        if timeout is not None:
+            values["timeout"] = float(timeout)
+        if retries is not None:
+            values["retry_policy"] = {"max_retries": int(retries)}
+    except ValueError:
+        raise ValueError("请检查 OPENAI_TIMEOUT 和 OPENAI_MAX_RETRIES 的数值配置") from None
     try:
         return LLMSettings(**values)
     except ValidationError as error:

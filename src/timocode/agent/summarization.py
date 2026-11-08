@@ -109,7 +109,7 @@ class SummaryGenerator:
         if response is None:
             raise ProviderProtocolError("摘要模型流缺少完整响应")
         if response.stop_reason != "stop" or response.message.tool_calls:
-            raise SummaryFormatError("摘要响应被截断或包含工具调用")
+            raise SummaryFormatError(f"摘要响应未正常结束，stop_reason={response.stop_reason}")
         try:
             summary = HistorySummary.model_validate_json(response.message.content)
         except ValidationError:

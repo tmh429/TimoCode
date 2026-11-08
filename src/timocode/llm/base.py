@@ -15,6 +15,19 @@ class ProviderProtocolError(ProviderError):
     """模型响应无法构成有效的内部响应。"""
 
 
+class ProviderHTTPError(ProviderError):
+    def __init__(self, status_code: int, *, retry_after: float | None = None):
+        super().__init__(f"模型服务返回 HTTP {status_code}")
+        self.status_code = status_code
+        self.retry_after = retry_after
+
+
+class ProviderConnectionError(ProviderError):
+    def __init__(self, message: str, *, retryable: bool):
+        super().__init__(message)
+        self.retryable = retryable
+
+
 @dataclass(frozen=True)
 class TextDelta:
     delta: str
