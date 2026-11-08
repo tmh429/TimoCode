@@ -28,7 +28,7 @@ async def run_task(
     prompt: str | None, *, workspace: Path | None, docker_image: str | None,
     sessions_dir: Path, max_iterations: int, max_tokens: int | None,
     context_window: int | None, trace: bool, trace_dir: Path | None,
-    renderer: TerminalRenderer,
+    renderer: TerminalRenderer, env_file: Path | None = None,
 ) -> int:
     if prompt is not None and not prompt.strip():
         raise ValueError("任务内容不能为空")
@@ -43,7 +43,7 @@ async def run_task(
     tools = [] if workspace is None else create_coding_tools(
         Workspace(root), PermissionManager(partial(confirm_console, output=sys.stderr)), docker_image=docker_image,
     )
-    settings = load_settings()
+    settings = load_settings() if env_file is None else load_settings(env_file)
     rules = DEFAULT_SYSTEM_PROMPT
     if workspace is not None:
         rules += "文件修改前先读取 sha256。收到 permission_denied 时停止对应操作并向用户说明。"
@@ -78,6 +78,9 @@ def run(
     context_window: Annotated[int | None, typer.Option(min=1, help="启用上下文窗口预算")] = None,
     trace: Annotated[bool, typer.Option("--trace", help="保存结构化执行追踪")] = False,
     trace_dir: Annotated[Path | None, typer.Option(help="追踪保存目录，需要 --trace")] = None,
+    env_file: Annotated[Path | None, typer.Option(
+        "--env-file", exists=True, dir_okay=False, readable=True, help="模型配置文件，默认启动目录的 .env",
+    )] = None,
 ) -> None:
     renderer = TerminalRenderer()
     try:
@@ -85,6 +88,7 @@ def run(
             prompt, workspace=workspace, docker_image=docker_image,
             sessions_dir=sessions_dir, max_iterations=max_iterations, max_tokens=max_tokens,
             context_window=context_window, trace=trace, trace_dir=trace_dir, renderer=renderer,
+            env_file=env_file,
         ))
     except (KeyboardInterrupt, asyncio.CancelledError):
         renderer.error("运行已取消。")
