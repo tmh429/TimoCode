@@ -5,7 +5,7 @@ from typing import Literal
 
 from timocode.agent.context import ContextReport
 from timocode.llm.base import ToolCallDelta
-from timocode.llm.schemas import DataModel, LLMResponse, Message, ToolCall, Usage
+from timocode.llm.schemas import DataModel, LLMRequest, LLMResponse, Message, ToolCall, Usage
 
 
 RunStatus = Literal[
@@ -47,3 +47,4 @@ class AgentEvent:
     reason: str | None = None
     response: LLMResponse | None = None
     context_report: ContextReport | None = None
+    request: LLMRequest | None = None

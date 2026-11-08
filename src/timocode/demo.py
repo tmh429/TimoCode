@@ -49,7 +49,10 @@ async def run_demo(
     keep_recent_turns: int | None = None, summary_context_window: int | None = None,
     summary_output_tokens: int | None = None,
     docker_image: str | None = None,
+    trace: bool = False, trace_dir: Path | None = None, trace_content: bool = False,
 ) -> int:
+    if not trace and (trace_dir is not None or trace_content):
+        raise ValueError("追踪目录和内容选项需要同时指定 --trace")
     if not auto_compact and any(value is not None for value in (
         compact_at, keep_recent_turns, summary_context_window, summary_output_tokens,
     )):
@@ -129,16 +132,26 @@ async def run_demo(
                 system_prompt=prompt_rules, max_iterations=max_iterations, context_budget=budget,
                 auto_compaction=policy,
                 max_tokens=max_tokens, on_event=render,
+                trace_directory=(trace_dir or Path(".timocode/traces")) if trace else None,
+                trace_content=trace_content, trace_secrets=(settings.api_key.get_secret_value(),),
             )
         else:
             session = await AgentSession.resume(
                 provider, resume_id, store=store, tools=tools, expected_cwd=root,
                 max_iterations=max_iterations, max_tokens=max_tokens, on_event=render,
+                trace_directory=(trace_dir or Path(".timocode/traces")) if trace else None,
+                trace_content=trace_content, trace_secrets=(settings.api_key.get_secret_value(),),
             )
         print(f"[session] {session.session_id}", flush=True)
         print(f"[model] {session.snapshot.header.model}", flush=True)
         print(f"[workspace] {root}", flush=True)
-        result = await session.continue_run() if prompt is None else await session.run(prompt)
+        try:
+            result = await session.continue_run() if prompt is None else await session.run(prompt)
+        finally:
+            if session.trace_path is not None:
+                print(f"\n[trace] {session.trace_path}", flush=True)
+            if session.trace_error is not None:
+                print(session.trace_error, file=sys.stderr)
     print(f"\n[{result.status}] model requests={result.iterations}")
     if result.error:
         print(result.error, file=sys.stderr)
@@ -162,6 +175,9 @@ def main() -> int:
     parser.add_argument("--keep-recent-turns", type=int, help="压缩保留用户回合数，默认 2")
     parser.add_argument("--summary-context-window", type=int, help="摘要请求窗口，默认使用任务窗口")
     parser.add_argument("--summary-output-tokens", type=int, help="摘要输出预留，默认 2048")
+    parser.add_argument("--trace", action="store_true", help="记录结构化执行追踪")
+    parser.add_argument("--trace-dir", type=Path, help="追踪目录，默认 .timocode/traces")
+    parser.add_argument("--trace-content", action="store_true", help="记录脱敏截断后的内容")
     args = parser.parse_args()
     if args.prompt is None and args.resume_id is None:
         parser.error("需要任务内容或 --resume")
@@ -173,6 +189,7 @@ def main() -> int:
             args.auto_compact, args.compact_at, args.keep_recent_turns,
             args.summary_context_window, args.summary_output_tokens,
             args.docker_image,
+            args.trace, args.trace_dir, args.trace_content,
         ))
     except KeyboardInterrupt:
         print("\n运行已取消。", file=sys.stderr)

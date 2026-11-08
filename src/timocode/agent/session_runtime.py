@@ -3,6 +3,7 @@
 import asyncio
 import uuid
 from collections.abc import Sequence
+from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -15,6 +16,7 @@ from timocode.agent.session import (
     CompactionEntry, SessionEntry, SessionSnapshot, SessionStore,
 )
 from timocode.agent.summarization import SummaryError, SummaryGenerator
+from timocode.agent.trace import TraceRecorder
 from timocode.agent.state import AgentEvent, AgentState, RunResult
 from timocode.llm.base import LLMProvider, ProviderError
 from timocode.llm.schemas import AssistantMessage, LLMRequest, Message, SystemMessage, Usage
@@ -27,6 +29,8 @@ class AgentSession:
         *, tools: Sequence[Tool] = (), max_iterations: int = 8,
         max_tokens: int | None = None, on_event: EventHandler | None = None,
         token_estimator: TokenEstimator | None = None,
+        trace_directory: str | Path | None = None, trace_content: bool = False,
+        trace_secrets: Sequence[str] = (),
     ):
         if snapshot.header.model is None:
             raise ValueError("会话缺少模型名称")
@@ -39,6 +43,11 @@ class AgentSession:
         self._header = snapshot.header.model_copy(deep=True)
         self._token_estimator = token_estimator
         self._provider = provider
+        self._trace_directory = trace_directory
+        self._trace_content = trace_content
+        self._trace_secrets = tuple(trace_secrets)
+        self._trace: TraceRecorder | None = None
+        self._last_trace: TraceRecorder | None = None
         self._tools = tuple(tools)
         self._max_iterations = max_iterations
         self._max_tokens = max_tokens
@@ -55,6 +64,8 @@ class AgentSession:
         system_prompt: str = DEFAULT_SYSTEM_PROMPT, max_iterations: int = 8,
         max_tokens: int | None = None, on_event: EventHandler | None = None,
         token_estimator: TokenEstimator | None = None,
+        trace_directory: str | Path | None = None, trace_content: bool = False,
+        trace_secrets: Sequence[str] = (),
         context_budget: ContextBudget | None = None,
         auto_compaction: AutoCompactionPolicy | None = None,
     ) -> "AgentSession":
@@ -67,6 +78,7 @@ class AgentSession:
         return cls(
             provider, store, snapshot, tools=tools, max_iterations=max_iterations,
             max_tokens=max_tokens, on_event=on_event, token_estimator=token_estimator,
+            trace_directory=trace_directory, trace_content=trace_content, trace_secrets=trace_secrets,
         )
 
     @classmethod
@@ -76,6 +88,8 @@ class AgentSession:
         expected_cwd: str | Path | None = None, max_iterations: int = 8,
         max_tokens: int | None = None, on_event: EventHandler | None = None,
         token_estimator: TokenEstimator | None = None,
+        trace_directory: str | Path | None = None, trace_content: bool = False,
+        trace_secrets: Sequence[str] = (),
     ) -> "AgentSession":
         store = store if store is not None else SessionStore()
         snapshot = await store.load(session_id)
@@ -85,6 +99,7 @@ class AgentSession:
         return cls(
             provider, store, snapshot, tools=tools, max_iterations=max_iterations,
             max_tokens=max_tokens, on_event=on_event, token_estimator=token_estimator,
+            trace_directory=trace_directory, trace_content=trace_content, trace_secrets=trace_secrets,
         )
 
     @staticmethod
@@ -136,20 +151,16 @@ class AgentSession:
         self, summarizer: SummaryGenerator, *, keep_recent_turns: int = 2,
     ) -> ContextReport | None:
         """手动压缩完整旧前缀，采纳前检查长度与预算，提交后重建 Agent。"""
-        if self._running:
-            raise RuntimeError("同一个会话已有任务运行中")
-        self._running = True
-        try:
-            await self._reload()
-            self._require_ready(self._snapshot)
-            report = await self._compact_snapshot(summarizer, keep_recent_turns=keep_recent_turns)
-            self._agent = self._build_agent()
-            return report
-        except (Exception, asyncio.CancelledError):
-            await self._reload_after_failure()
-            raise
-        finally:
-            self._running = False
+        async with self._execution("compact"):
+            try:
+                await self._reload()
+                self._require_ready(self._snapshot)
+                report = await self._compact_snapshot(summarizer, keep_recent_turns=keep_recent_turns)
+                self._agent = self._build_agent()
+                return report
+            except (Exception, asyncio.CancelledError):
+                await self._reload_after_failure()
+                raise
 
     async def _compact_snapshot(
         self, summarizer: SummaryGenerator, *, keep_recent_turns: int,
@@ -165,7 +176,17 @@ class AgentSession:
             if first_kept.sequence <= previous_kept.sequence:
                 return None
         before = self._context_report(self._snapshot.context_messages)
+        if self._trace is not None:
+            await self._trace.start_span("summary", "summary", {
+                "model": summarizer.model, "source_message_count": len(parts.to_summarize),
+                "source_sequence": self._snapshot.last_sequence,
+            })
         result = await summarizer.summarize(parts.to_summarize)
+        if self._trace is not None:
+            await self._trace.end_span("summary", "summary", {
+                "status": "ok", "usage": result.usage.model_dump(),
+                "summary": self._trace.content(result.summary.model_dump()),
+            })
         entry = CompactionEntry(
             type="compaction", id=uuid.uuid4().hex,
             sequence=self._snapshot.last_sequence + 1, timestamp=datetime.now(timezone.utc),
@@ -183,6 +204,11 @@ class AgentSession:
             self.session_id, entry.summary, first_kept_entry_id=first_kept.id,
             expected_sequence=entry.source_sequence, entry_id=entry.id, usage=entry.usage,
         )
+        if self._trace is not None:
+            await self._trace.record("compaction_saved", {
+                "entry_id": entry.id, "source_sequence": entry.source_sequence,
+                "first_kept_entry_id": first_kept.id,
+            })
         return after
 
     async def _before_request(self, report: ContextReport) -> list[Message] | None:
@@ -220,6 +246,47 @@ class AgentSession:
         except (SessionError, OSError, ValueError):
             self._storage_unavailable = True
 
+    @property
+    def trace_path(self) -> Path | None:
+        return self._last_trace.path if self._last_trace is not None else None
+
+    @property
+    def trace_error(self) -> str | None:
+        return self._last_trace.error if self._last_trace is not None else None
+
+    @asynccontextmanager
+    async def _execution(self, operation: str):
+        if self._running:
+            raise RuntimeError("同一个会话已有任务运行中")
+        trace = None if self._trace_directory is None else TraceRecorder(
+            self._trace_directory, self.session_id, self._header.model,
+            capture_content=self._trace_content, secrets=self._trace_secrets,
+        )
+        self._running = True
+        self._trace = self._last_trace = trace
+        failure = None
+        try:
+            if trace is not None:
+                await trace.start(operation)
+            yield
+        except asyncio.CancelledError as error:
+            if trace is not None:
+                trace.status = "cancelled"
+            failure = error
+            raise
+        except Exception as error:
+            if trace is not None:
+                trace.status = "exception"
+            failure = error
+            raise
+        finally:
+            try:
+                if trace is not None:
+                    await trace.finish(failure)
+            finally:
+                self._trace = None
+                self._running = False
+
     async def _handle_event(self, event: AgentEvent) -> None:
         if event.type == "message_complete":
             response = event.response
@@ -230,6 +297,11 @@ class AgentSession:
                 usage=response.usage if response is not None else None,
                 stop_reason=response.stop_reason if response is not None else None,
             )
+        if self._trace is not None:
+            try:
+                await self._trace.observe(event, session_sequence=self._snapshot.last_sequence)
+            except Exception as error:
+                self._trace.error = f"执行追踪处理失败（{type(error).__name__}）"
         if self._on_event is not None:
             await self._on_event(event)
 
@@ -242,33 +314,29 @@ class AgentSession:
         return await self._run(None)
 
     async def _run(self, user_input: str | None) -> RunResult:
-        if self._running:
-            raise RuntimeError("同一个会话已有任务运行中")
-        self._running = True
-        self._observed_usage = []
-        started = False
-        try:
-            await self._reload()
-            self._require_ready(self._snapshot)
-            started = True
-            if user_input is None:
-                return await self._agent.continue_run()
-            return await self._agent.run(user_input)
-        except asyncio.CancelledError:
-            await self._reload_after_failure()
-            raise
-        except (SessionError, OSError) as error:
-            iterations = self._agent.state.iterations if started else 0
-            report = self._agent.state.context_report if started else None
-            await self._reload_after_failure()
-            result = RunResult(
-                status="storage_error", messages=self._snapshot.context_messages,
-                iterations=iterations, usage=self._observed_usage, error=str(error), context_report=report,
-            )
-            await self._handle_event(AgentEvent(type="run_end", reason="storage_error", result=result.model_copy(deep=True)))
-            return result
-        except Exception:
-            await self._reload_after_failure()
-            raise
-        finally:
-            self._running = False
+        async with self._execution("run"):
+            self._observed_usage = []
+            started = False
+            try:
+                await self._reload()
+                self._require_ready(self._snapshot)
+                started = True
+                if user_input is None:
+                    return await self._agent.continue_run()
+                return await self._agent.run(user_input)
+            except asyncio.CancelledError:
+                await self._reload_after_failure()
+                raise
+            except (SessionError, OSError) as error:
+                iterations = self._agent.state.iterations if started else 0
+                report = self._agent.state.context_report if started else None
+                await self._reload_after_failure()
+                result = RunResult(
+                    status="storage_error", messages=self._snapshot.context_messages,
+                    iterations=iterations, usage=self._observed_usage, error=str(error), context_report=report,
+                )
+                await self._handle_event(AgentEvent(type="run_end", reason="storage_error", result=result.model_copy(deep=True)))
+                return result
+            except Exception:
+                await self._reload_after_failure()
+                raise

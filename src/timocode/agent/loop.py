@@ -220,7 +220,7 @@ class Agent:
                     return await self._finish(
                         "context_limit", usage, "估算输入超过上下文预算，请检查上下文配置",
                     )
-                await self._emit(AgentEvent(type="model_request_start"))
+                await self._emit(AgentEvent(type="model_request_start", request=request))
                 self._state.iterations += 1
                 response = await self._request_response(request)
                 usage.append(response.usage)
