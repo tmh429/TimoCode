@@ -6,6 +6,7 @@ from collections.abc import Sequence
 from datetime import datetime, timezone
 from pathlib import Path
 
+from timocode.agent.compaction import AutoCompactionPolicy, CompactionError
 from timocode.agent.context import ContextBudget, ContextBuilder, ContextReport, TokenEstimator
 from timocode.agent.history import split_history
 from timocode.agent.loop import Agent, DEFAULT_SYSTEM_PROMPT, EventHandler
@@ -15,7 +16,7 @@ from timocode.agent.session import (
 )
 from timocode.agent.summarization import SummaryError, SummaryGenerator
 from timocode.agent.state import AgentEvent, AgentState, RunResult
-from timocode.llm.base import LLMProvider
+from timocode.llm.base import LLMProvider, ProviderError
 from timocode.llm.schemas import AssistantMessage, LLMRequest, Message, SystemMessage, Usage
 from timocode.tools.base import Tool
 
@@ -55,11 +56,12 @@ class AgentSession:
         max_tokens: int | None = None, on_event: EventHandler | None = None,
         token_estimator: TokenEstimator | None = None,
         context_budget: ContextBudget | None = None,
+        auto_compaction: AutoCompactionPolicy | None = None,
     ) -> "AgentSession":
         store = store if store is not None else SessionStore()
         snapshot = await store.create(
             cwd, model=model, tool_names=[tool.definition.name for tool in tools],
-            context_budget=context_budget,
+            context_budget=context_budget, auto_compaction=auto_compaction,
         )
         snapshot = await store.append(snapshot.header.id, SystemMessage(content=system_prompt), expected_sequence=0)
         return cls(
@@ -116,6 +118,7 @@ class AgentSession:
             initial_messages=self._snapshot.context_messages, max_iterations=self._max_iterations,
             max_tokens=self._max_tokens, on_event=self._handle_event,
             context_budget=self._header.context_budget, token_estimator=self._token_estimator,
+            on_context=self._before_request,
             historical_tool_call_ids=[
                 call.id for message in self._snapshot.messages if isinstance(message, AssistantMessage)
                 for call in message.tool_calls
@@ -139,42 +142,69 @@ class AgentSession:
         try:
             await self._reload()
             self._require_ready(self._snapshot)
-            parts = split_history(self._snapshot.messages, keep_recent_turns=keep_recent_turns)
-            if not parts.can_compact:
-                return None
-            messages = [entry for entry in self._snapshot.entries if isinstance(entry, SessionEntry)]
-            first_kept = messages[parts.first_kept_index]
-            previous = self._snapshot.latest_compaction
-            if previous is not None:
-                previous_kept = next(entry for entry in messages if entry.id == previous.first_kept_entry_id)
-                if first_kept.sequence <= previous_kept.sequence:
-                    return None
-            before = self._context_report(self._snapshot.context_messages)
-            result = await summarizer.summarize(parts.to_summarize)
-            entry = CompactionEntry(
-                type="compaction", id=uuid.uuid4().hex,
-                sequence=self._snapshot.last_sequence + 1, timestamp=datetime.now(timezone.utc),
-                source_sequence=self._snapshot.last_sequence, first_kept_entry_id=first_kept.id,
-                summary=result.summary, usage=result.usage,
-            )
-            candidate = self._snapshot.model_copy(deep=True)
-            candidate.entries.append(entry)
-            after = self._context_report(candidate.context_messages)
-            if not after.fits:
-                raise SummaryError("压缩后的上下文仍超过预算")
-            if after.estimate.total >= before.estimate.total:
-                raise SummaryError("摘要未缩短上下文")
-            self._snapshot = await self.store.append_compaction(
-                self.session_id, entry.summary, first_kept_entry_id=first_kept.id,
-                expected_sequence=entry.source_sequence, entry_id=entry.id, usage=entry.usage,
-            )
+            report = await self._compact_snapshot(summarizer, keep_recent_turns=keep_recent_turns)
             self._agent = self._build_agent()
-            return after
+            return report
         except (Exception, asyncio.CancelledError):
             await self._reload_after_failure()
             raise
         finally:
             self._running = False
+
+    async def _compact_snapshot(
+        self, summarizer: SummaryGenerator, *, keep_recent_turns: int,
+    ) -> ContextReport | None:
+        parts = split_history(self._snapshot.messages, keep_recent_turns=keep_recent_turns)
+        if not parts.can_compact:
+            return None
+        messages = [entry for entry in self._snapshot.entries if isinstance(entry, SessionEntry)]
+        first_kept = messages[parts.first_kept_index]
+        previous = self._snapshot.latest_compaction
+        if previous is not None:
+            previous_kept = next(entry for entry in messages if entry.id == previous.first_kept_entry_id)
+            if first_kept.sequence <= previous_kept.sequence:
+                return None
+        before = self._context_report(self._snapshot.context_messages)
+        result = await summarizer.summarize(parts.to_summarize)
+        entry = CompactionEntry(
+            type="compaction", id=uuid.uuid4().hex,
+            sequence=self._snapshot.last_sequence + 1, timestamp=datetime.now(timezone.utc),
+            source_sequence=self._snapshot.last_sequence, first_kept_entry_id=first_kept.id,
+            summary=result.summary, usage=result.usage,
+        )
+        candidate = self._snapshot.model_copy(deep=True)
+        candidate.entries.append(entry)
+        after = self._context_report(candidate.context_messages)
+        if not after.fits:
+            raise SummaryError("压缩后的上下文仍超过预算")
+        if after.estimate.total >= before.estimate.total:
+            raise SummaryError("摘要未缩短上下文")
+        self._snapshot = await self.store.append_compaction(
+            self.session_id, entry.summary, first_kept_entry_id=first_kept.id,
+            expected_sequence=entry.source_sequence, entry_id=entry.id, usage=entry.usage,
+        )
+        return after
+
+    async def _before_request(self, report: ContextReport) -> list[Message] | None:
+        policy = self._header.auto_compaction
+        if policy is None or not policy.should_compact(report):
+            return None
+        self._require_ready(self._snapshot)
+        await self._handle_event(AgentEvent(type="compaction_start", context_report=report))
+        summarizer = SummaryGenerator(
+            self._provider, self._header.model, context_budget=policy.summary_budget,
+            token_estimator=self._token_estimator,
+        )
+        try:
+            after = await self._compact_snapshot(summarizer, keep_recent_turns=policy.keep_recent_turns)
+        except (SummaryError, ProviderError) as error:
+            await self._handle_event(AgentEvent(type="compaction_failed", reason=str(error), context_report=report))
+            raise CompactionError(str(error)) from None
+        await self._handle_event(AgentEvent(
+            type="compaction_end", reason="skipped" if after is None else "compacted",
+            context_report=report if after is None else after,
+        ))
+        return None if after is None else self._snapshot.context_messages
 
     async def _reload(self) -> None:
         snapshot = await self.store.load(self.session_id)

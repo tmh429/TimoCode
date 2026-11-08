@@ -8,7 +8,8 @@ from contextlib import aclosing
 
 from pydantic import ValidationError
 
-from timocode.agent.context import ContextBudget, ContextBuilder, TokenEstimator
+from timocode.agent.compaction import CompactionError
+from timocode.agent.context import ContextBudget, ContextBuilder, ContextReport, TokenEstimator
 from timocode.agent.state import AgentEvent, AgentState, RunResult, RunStatus
 from timocode.llm.base import (
     LLMProvider,
@@ -34,6 +35,7 @@ from timocode.tools.registry import ToolRegistry
 
 
 EventHandler = Callable[[AgentEvent], Awaitable[None]]
+ContextHandler = Callable[[ContextReport], Awaitable[Sequence[Message] | None]]
 DEFAULT_SYSTEM_PROMPT = "你是编程助手，请依据工具的实际结果回答。"
 
 
@@ -52,6 +54,7 @@ class Agent:
         context_budget: ContextBudget | None = None,
         token_estimator: TokenEstimator | None = None,
         historical_tool_call_ids: Sequence[str] = (),
+        on_context: ContextHandler | None = None,
     ):
         if not model.strip():
             raise ValueError("模型名称不能为空")
@@ -65,6 +68,7 @@ class Agent:
         self.max_iterations = max_iterations
         self.max_tokens = max_tokens
         self.on_event = on_event
+        self.on_context = on_context
         self._registry = ToolRegistry(tools)
         self._historical_tool_call_ids = set(historical_tool_call_ids)
         messages = [SystemMessage(content=system_prompt)] if initial_messages is None else [
@@ -116,6 +120,12 @@ class Agent:
         if any(call.id in used_ids for call in response.message.tool_calls):
             raise ProviderProtocolError("模型复用了历史工具调用 ID")
         return response
+
+    def _prepare_request(self) -> tuple[LLMRequest, ContextReport]:
+        return self._context.build(LLMRequest(
+            model=self.model, messages=self._state.messages,
+            tools=self._registry.definitions(), max_tokens=self.max_tokens,
+        ))
 
     async def _execute(self, call: ToolCall) -> None:
         await self._emit(AgentEvent(type="tool_start", tool_call=call))
@@ -192,12 +202,20 @@ class Agent:
             if message is not None:
                 await self._record(message)
             for _ in range(self.max_iterations):
-                request, report = self._context.build(LLMRequest(
-                    model=self.model, messages=self._state.messages,
-                    tools=self._registry.definitions(), max_tokens=self.max_tokens,
-                ))
+                request, report = self._prepare_request()
                 self._state.context_report = report
                 await self._emit(AgentEvent(type="context_checked", context_report=report))
+                if self.on_context is not None:
+                    replacement = await self.on_context(report.model_copy(deep=True))
+                    if replacement is not None:
+                        self._historical_tool_call_ids.update(
+                            call.id for item in self._state.messages if isinstance(item, AssistantMessage)
+                            for call in item.tool_calls
+                        )
+                        self._state.messages = [item.model_copy(deep=True) for item in replacement]
+                        request, report = self._prepare_request()
+                        self._state.context_report = report
+                        await self._emit(AgentEvent(type="context_checked", context_report=report))
                 if not report.fits:
                     return await self._finish(
                         "context_limit", usage, "估算输入超过上下文预算，请检查上下文配置",
@@ -229,6 +247,8 @@ class Agent:
             raise
         except ProviderProtocolError as error:
             return await self._finish("invalid_response", usage, str(error))
+        except CompactionError as error:
+            return await self._finish("compaction_error", usage, str(error))
         except ProviderError as error:
             return await self._finish("provider_error", usage, str(error))
         finally:

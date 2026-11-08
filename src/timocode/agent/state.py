@@ -8,7 +8,10 @@ from timocode.llm.base import ToolCallDelta
 from timocode.llm.schemas import DataModel, LLMResponse, Message, ToolCall, Usage
 
 
-RunStatus = Literal["completed", "max_iterations", "provider_error", "invalid_response", "storage_error", "context_limit"]
+RunStatus = Literal[
+    "completed", "max_iterations", "provider_error", "invalid_response",
+    "storage_error", "context_limit", "compaction_error",
+]
 
 
 class RunResult(DataModel):
@@ -34,6 +37,7 @@ class AgentEvent:
     type: Literal[
         "run_start", "context_checked", "model_request_start", "text_delta", "tool_call_delta",
         "message_complete", "tool_start", "tool_end", "run_end",
+        "compaction_start", "compaction_end", "compaction_failed",
     ]
     message: Message | None = None
     delta: str | None = None

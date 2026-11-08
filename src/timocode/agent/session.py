@@ -13,8 +13,9 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Annotated, BinaryIO, Iterator, Literal
 
-from pydantic import AwareDatetime, Field, TypeAdapter, ValidationError, field_validator
+from pydantic import AwareDatetime, Field, TypeAdapter, ValidationError, field_validator, model_validator
 
+from timocode.agent.compaction import AutoCompactionPolicy
 from timocode.agent.context import ContextBudget
 from timocode.agent.history import check_tool_association, split_history
 from timocode.agent.summarization import HistorySummary
@@ -62,6 +63,13 @@ class SessionHeader(DataModel):
     model: str | None = None
     tool_names: list[str] = Field(default_factory=list)
     context_budget: ContextBudget | None = None
+    auto_compaction: AutoCompactionPolicy | None = None
+
+    @model_validator(mode="after")
+    def require_compaction_budget(self) -> "SessionHeader":
+        if self.auto_compaction is not None and self.context_budget is None:
+            raise ValueError("自动压缩必须配置任务上下文预算")
+        return self
 
     @field_validator("tool_names")
     @classmethod
@@ -244,11 +252,14 @@ class SessionStore:
     async def create(
         self, cwd: str | Path, *, model: str | None = None, session_id: str | None = None,
         tool_names: list[str] | None = None, context_budget: ContextBudget | None = None,
+        auto_compaction: AutoCompactionPolicy | None = None,
     ) -> SessionSnapshot:
         context_budget = context_budget.model_copy(deep=True) if context_budget is not None else None
+        auto_compaction = auto_compaction.model_copy(deep=True) if auto_compaction is not None else None
         tool_names = list(tool_names) if tool_names is not None else []
         return await self._run_io(lambda: self._create(
             cwd, model=model, session_id=session_id, tool_names=tool_names, context_budget=context_budget,
+            auto_compaction=auto_compaction,
         ))
 
     async def load(self, session_id: str) -> SessionSnapshot:
@@ -360,6 +371,7 @@ class SessionStore:
     def _create(
         self, cwd: str | Path, *, model: str | None = None, session_id: str | None = None,
         tool_names: list[str] | None = None, context_budget: ContextBudget | None = None,
+        auto_compaction: AutoCompactionPolicy | None = None,
     ) -> SessionSnapshot:
         session_id = session_id if session_id is not None else uuid.uuid4().hex
         working_directory = Path(cwd).resolve(strict=True)
@@ -369,6 +381,7 @@ class SessionStore:
             type="session", version=1, id=session_id,
             created_at=datetime.now(timezone.utc), cwd=str(working_directory), model=model,
             tool_names=tool_names if tool_names is not None else [], context_budget=context_budget,
+            auto_compaction=auto_compaction,
         )
         with self._locked(session_id):
             path = self._path(session_id)
