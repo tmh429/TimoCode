@@ -1,18 +1,22 @@
 """连接 Agent 的完整消息事件、会话保存和重启恢复。"""
 
 import asyncio
+import uuid
 from collections.abc import Sequence
+from datetime import datetime, timezone
 from pathlib import Path
 
-from timocode.agent.context import ContextBudget, TokenEstimator
+from timocode.agent.context import ContextBudget, ContextBuilder, ContextReport, TokenEstimator
+from timocode.agent.history import split_history
 from timocode.agent.loop import Agent, DEFAULT_SYSTEM_PROMPT, EventHandler
 from timocode.agent.session import (
     SessionConflictError, SessionError, SessionRecoveryRequired,
-    SessionSnapshot, SessionStore,
+    CompactionEntry, SessionEntry, SessionSnapshot, SessionStore,
 )
+from timocode.agent.summarization import SummaryError, SummaryGenerator
 from timocode.agent.state import AgentEvent, AgentState, RunResult
 from timocode.llm.base import LLMProvider
-from timocode.llm.schemas import SystemMessage, Usage
+from timocode.llm.schemas import AssistantMessage, LLMRequest, Message, SystemMessage, Usage
 from timocode.tools.base import Tool
 
 
@@ -101,7 +105,7 @@ class AgentSession:
     def state(self) -> AgentState:
         state = self._agent.state
         if self._storage_unavailable:
-            state.messages = self._snapshot.messages
+            state.messages = self._snapshot.context_messages
         state.is_running = self._running
         state.needs_recovery |= self._snapshot.needs_recovery or self._storage_unavailable
         return state
@@ -109,10 +113,68 @@ class AgentSession:
     def _build_agent(self) -> Agent:
         return Agent(
             self._provider, self._header.model, tools=self._tools,
-            initial_messages=self._snapshot.messages, max_iterations=self._max_iterations,
+            initial_messages=self._snapshot.context_messages, max_iterations=self._max_iterations,
             max_tokens=self._max_tokens, on_event=self._handle_event,
             context_budget=self._header.context_budget, token_estimator=self._token_estimator,
+            historical_tool_call_ids=[
+                call.id for message in self._snapshot.messages if isinstance(message, AssistantMessage)
+                for call in message.tool_calls
+            ],
         )
+
+    def _context_report(self, messages: Sequence[Message]) -> ContextReport:
+        _, report = ContextBuilder(self._header.context_budget, self._token_estimator).build(LLMRequest(
+            model=self._header.model, messages=list(messages),
+            tools=[tool.definition for tool in self._tools], max_tokens=self._max_tokens,
+        ))
+        return report
+
+    async def compact(
+        self, summarizer: SummaryGenerator, *, keep_recent_turns: int = 2,
+    ) -> ContextReport | None:
+        """手动压缩完整旧前缀，采纳前检查长度与预算，提交后重建 Agent。"""
+        if self._running:
+            raise RuntimeError("同一个会话已有任务运行中")
+        self._running = True
+        try:
+            await self._reload()
+            self._require_ready(self._snapshot)
+            parts = split_history(self._snapshot.messages, keep_recent_turns=keep_recent_turns)
+            if not parts.can_compact:
+                return None
+            messages = [entry for entry in self._snapshot.entries if isinstance(entry, SessionEntry)]
+            first_kept = messages[parts.first_kept_index]
+            previous = self._snapshot.latest_compaction
+            if previous is not None:
+                previous_kept = next(entry for entry in messages if entry.id == previous.first_kept_entry_id)
+                if first_kept.sequence <= previous_kept.sequence:
+                    return None
+            before = self._context_report(self._snapshot.context_messages)
+            result = await summarizer.summarize(parts.to_summarize)
+            entry = CompactionEntry(
+                type="compaction", id=uuid.uuid4().hex,
+                sequence=self._snapshot.last_sequence + 1, timestamp=datetime.now(timezone.utc),
+                source_sequence=self._snapshot.last_sequence, first_kept_entry_id=first_kept.id,
+                summary=result.summary, usage=result.usage,
+            )
+            candidate = self._snapshot.model_copy(deep=True)
+            candidate.entries.append(entry)
+            after = self._context_report(candidate.context_messages)
+            if not after.fits:
+                raise SummaryError("压缩后的上下文仍超过预算")
+            if after.estimate.total >= before.estimate.total:
+                raise SummaryError("摘要未缩短上下文")
+            self._snapshot = await self.store.append_compaction(
+                self.session_id, entry.summary, first_kept_entry_id=first_kept.id,
+                expected_sequence=entry.source_sequence, entry_id=entry.id, usage=entry.usage,
+            )
+            self._agent = self._build_agent()
+            return after
+        except (Exception, asyncio.CancelledError):
+            await self._reload_after_failure()
+            raise
+        finally:
+            self._running = False
 
     async def _reload(self) -> None:
         snapshot = await self.store.load(self.session_id)
@@ -170,7 +232,7 @@ class AgentSession:
             report = self._agent.state.context_report if started else None
             await self._reload_after_failure()
             result = RunResult(
-                status="storage_error", messages=self._snapshot.messages,
+                status="storage_error", messages=self._snapshot.context_messages,
                 iterations=iterations, usage=self._observed_usage, error=str(error), context_report=report,
             )
             await self._handle_event(AgentEvent(type="run_end", reason="storage_error", result=result.model_copy(deep=True)))

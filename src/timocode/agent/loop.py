@@ -51,6 +51,7 @@ class Agent:
         initial_messages: Sequence[Message] | None = None,
         context_budget: ContextBudget | None = None,
         token_estimator: TokenEstimator | None = None,
+        historical_tool_call_ids: Sequence[str] = (),
     ):
         if not model.strip():
             raise ValueError("模型名称不能为空")
@@ -65,6 +66,7 @@ class Agent:
         self.max_tokens = max_tokens
         self.on_event = on_event
         self._registry = ToolRegistry(tools)
+        self._historical_tool_call_ids = set(historical_tool_call_ids)
         messages = [SystemMessage(content=system_prompt)] if initial_messages is None else [
             message.model_copy(deep=True) for message in initial_messages
         ]
@@ -110,6 +112,7 @@ class Agent:
             if isinstance(message, AssistantMessage)
             for call in message.tool_calls
         }
+        used_ids.update(self._historical_tool_call_ids)
         if any(call.id in used_ids for call in response.message.tool_calls):
             raise ProviderProtocolError("模型复用了历史工具调用 ID")
         return response
