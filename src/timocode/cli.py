@@ -47,21 +47,36 @@ async def run_task(
     rules = DEFAULT_SYSTEM_PROMPT
     if workspace is not None:
         rules += "文件修改前先读取 sha256。收到 permission_denied 时停止对应操作并向用户说明。"
+    store = SessionStore(sessions_dir)
     async with OpenAICompatibleProvider(settings) as provider:
         new_session = partial(
             AgentSession.create,
-            provider, settings.model, root, store=SessionStore(sessions_dir), tools=tools,
+            provider, settings.model, root, store=store, tools=tools,
             system_prompt=rules, max_iterations=max_iterations, max_tokens=max_tokens,
             context_budget=budget, on_event=renderer,
             trace_directory=(trace_dir or Path(".timocode/traces")) if trace else None,
             trace_secrets=(settings.api_key.get_secret_value(),),
         )
+
+        async def resume_session(session_id: str) -> AgentSession:
+            restored = await AgentSession.resume(
+                provider, session_id, store=store, tools=tools, expected_cwd=root,
+                max_iterations=max_iterations, max_tokens=max_tokens, on_event=renderer,
+                trace_directory=(trace_dir or Path(".timocode/traces")) if trace else None,
+                trace_secrets=(settings.api_key.get_secret_value(),),
+            )
+            if budget is not None and budget != restored.snapshot.header.context_budget:
+                raise ValueError("上下文预算与保存配置不一致，请使用原配置或省略 --context-window")
+            return restored
+
         session = await new_session()
         renderer.info(f"[session] {session.session_id}")
         renderer.info(f"[model] {settings.model}")
         renderer.info(f"[workspace] {root}" if workspace is not None else "[tools] 未授权工作目录")
         if prompt is None:
-            return await interact(session, new_session=new_session, renderer=renderer)
+            return await interact(
+                session, new_session=new_session, resume_session=resume_session, renderer=renderer,
+            )
         return await run_turn(session, prompt, renderer)
 
 
