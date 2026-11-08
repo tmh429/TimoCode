@@ -48,6 +48,7 @@ async def run_demo(
     auto_compact: bool = False, compact_at: float | None = None,
     keep_recent_turns: int | None = None, summary_context_window: int | None = None,
     summary_output_tokens: int | None = None,
+    docker_image: str | None = None,
 ) -> int:
     if not auto_compact and any(value is not None for value in (
         compact_at, keep_recent_turns, summary_context_window, summary_output_tokens,
@@ -65,6 +66,8 @@ async def run_demo(
     settings = load_settings()
     store = SessionStore(sessions_dir)
     snapshot = await store.load(resume_id) if resume_id is not None else None
+    if docker_image is not None and workspace is None and snapshot is None:
+        raise ValueError("--docker-image 需要同时指定 --workspace")
     policy = None
     if auto_compact:
         saved = snapshot.header.auto_compaction if snapshot is not None else None
@@ -98,15 +101,23 @@ async def run_demo(
             raise ValueError("指定工作目录与会话保存目录不一致")
         names = snapshot.header.tool_names
         if names == ["add"]:
+            if docker_image is not None:
+                raise ValueError("加法演示会话不能启用 Docker 工具")
             tools = [AddTool()]
         elif names == ["read_file", "write_file", "edit_file", "list_files", "search_files", "bash"]:
+            if docker_image is not None:
+                raise ValueError("宿主 Shell 会话需使用原工具配置，请创建 Docker 工具的新会话")
             tools = create_coding_tools(Workspace(root), PermissionManager(confirm_console))
+        elif names == ["read_file", "write_file", "edit_file", "list_files", "search_files", "docker_shell"]:
+            if docker_image is None:
+                raise ValueError("恢复 Docker 会话需要显式指定 --docker-image")
+            tools = create_coding_tools(Workspace(root), PermissionManager(confirm_console), docker_image=docker_image)
         else:
             raise ValueError("此入口无法重建保存的工具集合，请通过 Python API 明确传入工具")
     else:
         root = workspace.resolve(strict=True) if workspace is not None else Path.cwd()
         tools = [AddTool()] if workspace is None else create_coding_tools(
-            Workspace(root), PermissionManager(confirm_console),
+            Workspace(root), PermissionManager(confirm_console), docker_image=docker_image,
         )
     prompt_rules = DEFAULT_SYSTEM_PROMPT
     if snapshot is None and workspace is not None:
@@ -140,6 +151,7 @@ def main() -> int:
     parser.add_argument("--max-iterations", type=int, default=8)
     parser.add_argument("--max-tokens", type=int)
     parser.add_argument("--workspace", type=Path, help="启用 Coding Tools 并授权指定工作目录")
+    parser.add_argument("--docker-image", help="使用本地 Linux Python 镜像启用隔离命令工具，恢复时需显式指定")
     parser.add_argument("--resume", dest="resume_id", help="恢复指定会话 ID")
     parser.add_argument("--sessions-dir", type=Path, default=Path(".timocode/sessions"), help="会话文件目录")
     parser.add_argument("--context-window", type=int, help="上下文窗口 Token 数，显式指定后启用预算限制")
@@ -160,6 +172,7 @@ def main() -> int:
             args.reserve_output_tokens, args.safety_margin_tokens,
             args.auto_compact, args.compact_at, args.keep_recent_turns,
             args.summary_context_window, args.summary_output_tokens,
+            args.docker_image,
         ))
     except KeyboardInterrupt:
         print("\n运行已取消。", file=sys.stderr)

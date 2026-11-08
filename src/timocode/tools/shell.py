@@ -1,16 +1,14 @@
 """逐次批准的命令执行，支持超时、有界输出和进程树清理。"""
 
-import asyncio
 import json
 import os
 import shutil
-import signal
 
 from pydantic import Field, JsonValue
 
 from timocode.llm.schemas import DataModel, ToolDefinition
 from timocode.security.permissions import PermissionManager, PermissionRequest
-from timocode.security.processes import WindowsJob
+from timocode.security.execution import run_process
 from timocode.security.workspace import Workspace
 from timocode.tools.base import ToolResult
 
@@ -20,15 +18,6 @@ class ShellArguments(DataModel):
     cwd: str = "."
     timeout_seconds: float = Field(default=30.0, gt=0, le=300)
     max_output_bytes: int = Field(default=16384, ge=1, le=131072)
-
-
-async def _capture(stream: asyncio.StreamReader, limit: int) -> tuple[str, bool]:
-    kept = bytearray()
-    size = 0
-    while chunk := await stream.read(65536):
-        size += len(chunk)
-        kept.extend(chunk[:max(0, limit - len(kept))])
-    return kept.decode("utf-8", errors="replace"), size > limit
 
 
 class ShellTool:
@@ -67,65 +56,12 @@ class ShellTool:
             command = [self.executable, "-NoLogo", "-NoProfile", "-NonInteractive", "-Command", script]
         else:
             command = [self.executable, "--noprofile", "--norc", "-c", args.command]
-        job = WindowsJob() if os.name == "nt" else None
-        process = None
-        readers = []
-        timed_out = False
-        try:
-            spawning = asyncio.create_task(asyncio.create_subprocess_exec(
-                *command, cwd=cwd, stdin=asyncio.subprocess.DEVNULL,
-                stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
-                start_new_session=os.name != "nt",
-                env={**os.environ, "PYTHONIOENCODING": "utf-8", "PYTHONUNBUFFERED": "1"},
-                creationflags=0x4 if os.name == "nt" else 0,
-            ))
-            try:
-                process = await asyncio.shield(spawning)
-            except asyncio.CancelledError:
-                process = await spawning
-                raise
-            if job is not None:
-                job.attach(process.pid)
-            readers = [
-                asyncio.create_task(_capture(process.stdout, args.max_output_bytes)),
-                asyncio.create_task(_capture(process.stderr, args.max_output_bytes)),
-            ]
-            try:
-                async with asyncio.timeout(args.timeout_seconds):
-                    # shield 保留输出读取任务，超时后仍可收集已截断的输出。
-                    await asyncio.shield(asyncio.gather(*readers))
-                    await process.wait()
-            except TimeoutError:
-                timed_out = True
-                await self._terminate(process, job)
-            stdout, stderr = await asyncio.gather(*readers)
-            return ToolResult(content=json.dumps({
-                "shell": self.backend, "exit_code": process.returncode,
-                "stdout": stdout[0], "stderr": stderr[0],
-                "stdout_truncated": stdout[1], "stderr_truncated": stderr[1],
-                "timed_out": timed_out,
-            }, ensure_ascii=False), is_error=timed_out or process.returncode != 0)
-        finally:
-            try:
-                if process is not None:
-                    await self._terminate(process, job)
-            finally:
-                if job is not None:
-                    job.close()
-                if readers:
-                    await asyncio.gather(*readers, return_exceptions=True)
-
-    async def _terminate(self, process: asyncio.subprocess.Process, job: WindowsJob | None) -> None:
-        if job is not None:
-            job.terminate()
-        else:
-            try:
-                os.killpg(process.pid, signal.SIGKILL)
-            except ProcessLookupError:
-                pass
-        if process.returncode is None:
-            try:
-                process.kill()
-            except ProcessLookupError:
-                pass
-        await process.wait()
+        result = await run_process(
+            command, cwd=cwd, timeout_seconds=args.timeout_seconds,
+            max_output_bytes=args.max_output_bytes,
+            env={**os.environ, "PYTHONIOENCODING": "utf-8", "PYTHONUNBUFFERED": "1"},
+        )
+        return ToolResult(
+            content=json.dumps({"shell": self.backend, **result.as_dict()}, ensure_ascii=False),
+            is_error=result.timed_out or result.exit_code != 0,
+        )
