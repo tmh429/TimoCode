@@ -33,7 +33,7 @@ class AgentSession:
         trace_directory: str | Path | None = None, trace_content: bool = False,
         trace_secrets: Sequence[str] = (),
     ):
-        if snapshot.header.model is None:
+        if snapshot.model is None:
             raise ValueError("会话缺少模型名称")
         if snapshot.header.tool_names != [tool.definition.name for tool in tools]:
             raise ValueError("恢复会话时的工具集合或顺序与保存配置不一致")
@@ -116,6 +116,31 @@ class AgentSession:
         return self._header.id
 
     @property
+    def model(self) -> str:
+        return self._snapshot.model
+
+    async def set_model(self, model: str) -> None:
+        """保存模型切换记录，重建运行时并保留会话历史。"""
+        async with self._execution("model_change"):
+            try:
+                await self._reload()
+                self._require_ready(self._snapshot)
+                previous = self.model
+                self._snapshot = await self.store.append_model_change(
+                    self.session_id, model, expected_sequence=self._snapshot.last_sequence,
+                )
+                self._agent = self._build_agent()
+                if self._trace is not None:
+                    self._trace.model = self.model
+                    await self._trace.record("model_changed", {
+                        "previous_model": previous, "model": self.model,
+                        "session_sequence": self._snapshot.last_sequence,
+                    })
+            except (Exception, asyncio.CancelledError):
+                await self._reload_after_failure()
+                raise
+
+    @property
     def snapshot(self) -> SessionSnapshot:
         return self._snapshot.model_copy(deep=True)
 
@@ -135,7 +160,7 @@ class AgentSession:
 
     def _build_agent(self) -> Agent:
         return Agent(
-            self._provider, self._header.model, tools=self._tools,
+            self._provider, self.model, tools=self._tools,
             initial_messages=self._snapshot.context_messages, max_iterations=self._max_iterations,
             max_tokens=self._max_tokens, on_event=self._handle_event,
             context_budget=self._header.context_budget, token_estimator=self._token_estimator,
@@ -148,7 +173,7 @@ class AgentSession:
 
     def _context_report(self, messages: Sequence[Message]) -> ContextReport:
         _, report = ContextBuilder(self._header.context_budget, self._token_estimator).build(LLMRequest(
-            model=self._header.model, messages=list(messages),
+            model=self.model, messages=list(messages),
             tools=[tool.definition for tool in self._tools], max_tokens=self._max_tokens,
         ))
         return report
@@ -224,7 +249,7 @@ class AgentSession:
         self._require_ready(self._snapshot)
         await self._handle_event(AgentEvent(type="compaction_start", context_report=report))
         summarizer = SummaryGenerator(
-            self._provider, self._header.model, context_budget=policy.summary_budget,
+            self._provider, self.model, context_budget=policy.summary_budget,
             token_estimator=self._token_estimator,
         )
         try:
@@ -244,6 +269,8 @@ class AgentSession:
             raise SessionConflictError("会话头发生变化，请核查配置后重新打开会话")
         self._snapshot = snapshot
         self._agent = self._build_agent()
+        if self._trace is not None:
+            self._trace.model = self.model
         self._storage_unavailable = False
 
     async def _reload_after_failure(self) -> None:
@@ -265,7 +292,7 @@ class AgentSession:
         if self._running:
             raise RuntimeError("同一个会话已有任务运行中")
         trace = None if self._trace_directory is None else TraceRecorder(
-            self._trace_directory, self.session_id, self._header.model,
+            self._trace_directory, self.session_id, self.model,
             capture_content=self._trace_content, secrets=self._trace_secrets,
         )
         self._running = True

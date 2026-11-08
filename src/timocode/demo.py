@@ -143,7 +143,7 @@ async def run_demo(
                 trace_content=trace_content, trace_secrets=(settings.api_key.get_secret_value(),),
             )
         print(f"[session] {session.session_id}", flush=True)
-        print(f"[model] {session.snapshot.header.model}", flush=True)
+        print(f"[model] {session.model}", flush=True)
         print(f"[workspace] {root}", flush=True)
         try:
             result = await session.continue_run() if prompt is None else await session.run(prompt)

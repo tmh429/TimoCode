@@ -99,7 +99,7 @@ class TerminalRenderer:
             status = "recovery_required"
         self.info(f"[status] {status}")
         self.info(f"[session] {snapshot.header.id}")
-        self.info(f"[model] {snapshot.header.model}")
+        self.info(f"[model] {snapshot.model}")
         self.info(f"[workspace] {snapshot.header.cwd}")
         self.info(f"[tools] {', '.join(snapshot.header.tool_names) or '无'}")
         self.info(

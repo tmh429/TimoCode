@@ -31,7 +31,7 @@ async def conversation_loop(
     read_line: Callable[[], Awaitable[str]], renderer: TerminalRenderer,
     resume_session: Callable[[str], Awaitable[AgentSession]] | None = None,
 ) -> int:
-    renderer.info("输入任务开始对话，/new 新建会话，/resume <会话ID> 恢复会话，/status 查看状态，/exit 退出。")
+    renderer.info("输入任务开始对话，/new 新建会话，/resume <会话ID> 恢复会话，/model [名称] 查看或切换模型，/status 查看状态，/exit 退出。")
     while True:
         try:
             line = await read_line()
@@ -59,9 +59,21 @@ async def conversation_loop(
                 continue
             session = replacement
             renderer.info(f"[session] {session.session_id}")
-            renderer.info(f"[model] {session.snapshot.header.model}")
+            renderer.info(f"[model] {session.model}")
             continue
         parts = text.split()
+        if parts[0] == "/model":
+            if len(parts) > 2:
+                renderer.error("用法为 /model 或 /model <模型名称>。")
+                continue
+            if len(parts) == 2:
+                try:
+                    await session.set_model(parts[1])
+                except (SessionError, OSError, ValueError) as error:
+                    renderer.error(f"模型切换失败，当前模型为 {session.model}。{error}")
+                    continue
+            renderer.info(f"[model] {session.model}")
+            continue
         if parts[0] == "/resume":
             if len(parts) != 2:
                 renderer.error("用法为 /resume <会话ID>，会话 ID 可从 [session] 输出获取。")
@@ -76,10 +88,10 @@ async def conversation_loop(
                 continue
             session = replacement
             renderer.info(f"[session] {session.session_id}")
-            renderer.info(f"[model] {session.snapshot.header.model}")
+            renderer.info(f"[model] {session.model}")
             continue
         if text.startswith("/"):
-            renderer.error("未知命令。可用命令为 /new、/resume <会话ID>、/status 和 /exit，命令单独占一行。")
+            renderer.error("未知命令。可用命令为 /new、/resume <会话ID>、/model [名称]、/status 和 /exit，命令单独占一行。")
             continue
         # 输入文本保留原始缩进，strip 仅用于空白判断与命令识别。
         await run_turn(session, line, renderer)

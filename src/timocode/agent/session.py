@@ -100,7 +100,22 @@ class CompactionEntry(DataModel):
     usage: Usage | None = None
 
 
-SessionRecord = Annotated[SessionEntry | CompactionEntry, Field(discriminator="type")]
+class ModelChangeEntry(DataModel):
+    type: Literal["model_change"]
+    id: Identifier
+    sequence: int = Field(ge=1)
+    timestamp: AwareDatetime
+    model: str = Field(min_length=1)
+
+    @field_validator("model")
+    @classmethod
+    def require_model_name(cls, value: str) -> str:
+        if any(character.isspace() for character in value):
+            raise ValueError("模型名称不能包含空白字符")
+        return value
+
+
+SessionRecord = Annotated[SessionEntry | CompactionEntry | ModelChangeEntry, Field(discriminator="type")]
 RECORD_ADAPTER = TypeAdapter(SessionRecord)
 
 
@@ -111,6 +126,13 @@ class SessionSnapshot(DataModel):
     file_sha256: str
     tail_issue: TailIssue | None = None
     backup_path: str | None = None
+
+    @property
+    def model(self) -> str | None:
+        for entry in reversed(self.entries):
+            if isinstance(entry, ModelChangeEntry):
+                return entry.model
+        return self.header.model
 
     @property
     def messages(self) -> list[Message]:
@@ -176,6 +198,11 @@ def _check_entry(
 ) -> None:
     if entry.sequence != index or entry.id in entry_ids:
         raise SessionCorruptionError(f"第 {index} 条消息的序号或 ID 无效")
+    if isinstance(entry, ModelChangeEntry):
+        if pending:
+            raise SessionCorruptionError("模型切换之前存在未完成工具调用")
+        entry_ids.add(entry.id)
+        return
     if isinstance(entry, CompactionEntry):
         _check_compaction(entry, entries, pending)
         entry_ids.add(entry.id)
@@ -293,6 +320,15 @@ class SessionStore:
         return await self._run_io(lambda: self._append_compaction(
             session_id, summary, first_kept_entry_id=first_kept_entry_id,
             expected_sequence=expected_sequence, entry_id=entry_id, usage=usage,
+        ))
+
+    async def append_model_change(
+        self, session_id: str, model: str, *, expected_sequence: int, entry_id: str | None = None,
+    ) -> SessionSnapshot:
+        if type(expected_sequence) is not int or expected_sequence < 1:
+            raise ValueError("模型切换预期序号必须为正整数")
+        return await self._run_io(lambda: self._append_model_change(
+            session_id, model, expected_sequence=expected_sequence, entry_id=entry_id,
         ))
 
     def _path(self, session_id: str, suffix: str = ".jsonl") -> Path:
@@ -465,6 +501,29 @@ class SessionStore:
                 entry, snapshot.last_sequence + 1, {item.id for item in snapshot.entries},
                 set(), {call.id: call for call in snapshot.pending_tool_calls}, snapshot.entries,
             )
+            self._write_entry(session_id, entry)
+            return self._read(session_id)[0]
+
+    def _append_model_change(
+        self, session_id: str, model: str, *, expected_sequence: int, entry_id: str | None,
+    ) -> SessionSnapshot:
+        with self._locked(session_id):
+            snapshot, _ = self._read(session_id)
+            if snapshot.needs_recovery:
+                raise SessionRecoveryRequired("会话需要修复或存在未完成工具调用，请先核查恢复")
+            entry = ModelChangeEntry(
+                type="model_change", id=entry_id if entry_id is not None else uuid.uuid4().hex,
+                sequence=snapshot.last_sequence + 1, timestamp=datetime.now(timezone.utc), model=model,
+            )
+            for existing in snapshot.entries:
+                if existing.id == entry.id:
+                    if not isinstance(existing, ModelChangeEntry) or existing.model != entry.model:
+                        raise SessionConflictError("条目 ID 已被不同内容使用")
+                    return snapshot
+            if expected_sequence != snapshot.last_sequence:
+                raise SessionConflictError("预期序号已过期，请重新加载会话")
+            if snapshot.model == model:
+                return snapshot
             self._write_entry(session_id, entry)
             return self._read(session_id)[0]
 
