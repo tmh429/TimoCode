@@ -19,6 +19,7 @@ from timocode.agent.summarization import SummaryError, SummaryGenerator
 from timocode.agent.trace import TraceRecorder
 from timocode.agent.state import AgentEvent, AgentState, RunResult
 from timocode.llm.base import LLMProvider, ProviderError
+from timocode.llm.telemetry import bind_http_trace
 from timocode.llm.schemas import AssistantMessage, LLMRequest, Message, SystemMessage, Usage
 from timocode.tools.base import Tool
 
@@ -268,7 +269,8 @@ class AgentSession:
         try:
             if trace is not None:
                 await trace.start(operation)
-            yield
+            with bind_http_trace(trace):
+                yield
         except asyncio.CancelledError as error:
             if trace is not None:
                 trace.status = "cancelled"

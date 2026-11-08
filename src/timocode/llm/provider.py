@@ -22,6 +22,7 @@ from timocode.llm.base import (
 )
 from timocode.llm.config import LLMSettings
 from timocode.llm.retry import parse_retry_after
+from timocode.llm.telemetry import HTTPRequestTrace
 from timocode.llm.schemas import (
     AssistantMessage,
     LLMRequest,
@@ -147,21 +148,44 @@ class OpenAICompatibleProvider:
     async def stream(self, request: LLMRequest) -> AsyncGenerator[LLMEvent, None]:
         payload = _request_payload(request)
         policy = self.settings.retry_policy.model_copy(deep=True)
+        trace = HTTPRequestTrace()
         for attempt in range(policy.max_retries + 1):
             emitted = False
+            response = None
+            failure = None
+            delay = None
+            status = "error"
             try:
-                async with aclosing(self._stream_once(payload)) as stream:
+                await trace.start_attempt(attempt + 1, payload["model"], policy.max_retries + 1)
+                async with aclosing(self._stream_once(payload, trace=trace)) as stream:
                     async for event in stream:
+                        if isinstance(event, ResponseComplete):
+                            response = event.response
                         emitted = True
                         yield event
+                status = "completed"
                 return
             except (ProviderHTTPError, ProviderConnectionError) as error:
-                delay = policy.delay(attempt, error)
-                if emitted or delay is None:
+                failure = error
+                delay = None if emitted else policy.delay(attempt, error)
+                if delay is None:
                     raise
-            await asyncio.sleep(delay)
+            except asyncio.CancelledError:
+                status = "cancelled"
+                raise
+            except GeneratorExit:
+                status = "completed" if response is not None else "closed"
+                raise
+            except Exception as error:
+                failure = error
+                raise
+            finally:
+                await trace.end_attempt(
+                    status, error=failure, response=response, emitted=emitted, retry_delay=delay,
+                )
+            await trace.wait(delay, failure)
 
-    async def _stream_once(self, request_payload: dict) -> AsyncGenerator[LLMEvent, None]:
+    async def _stream_once(self, request_payload: dict, *, trace: HTTPRequestTrace) -> AsyncGenerator[LLMEvent, None]:
         text_parts: list[str] = []
         tool_parts: dict[int, _ToolParts] = {}
         finish_reason: str | None = None
@@ -170,6 +194,7 @@ class OpenAICompatibleProvider:
         received_response = False
 
         try:
+            trace.client_stream_started = True
             async with self._client.stream(
                 "POST",
                 self.settings.base_url + "/chat/completions",
@@ -181,6 +206,10 @@ class OpenAICompatibleProvider:
                 timeout=self.settings.timeout,
             ) as response:
                 received_response = True
+                await trace.headers(
+                    response.status_code,
+                    response.headers.get("x-request-id") or response.headers.get("request-id"),
+                )
                 if response.status_code >= 400:
                     raise ProviderHTTPError(
                         response.status_code,
@@ -206,6 +235,7 @@ class OpenAICompatibleProvider:
                             input_tokens=chunk.usage.prompt_tokens,
                             output_tokens=chunk.usage.completion_tokens,
                         )
+                        trace.reported_usage = usage
                     if not chunk.choices:
                         continue
                     if len(chunk.choices) != 1 or finish_reason is not None:
@@ -230,13 +260,21 @@ class OpenAICompatibleProvider:
                             arguments_delta=fragment.function.arguments or "",
                         )
                     finish_reason = choice.finish_reason
-        except (httpx.ConnectTimeout, httpx.PoolTimeout):
+                    trace.reported_stop_reason = (
+                        finish_reason if finish_reason in {None, "stop", "tool_calls", "length", "content_filter"}
+                        else "unsupported"
+                    )
+        except (httpx.ConnectTimeout, httpx.PoolTimeout) as error:
+            trace.transport_error_type = type(error).__name__
             raise ProviderConnectionError("模型连接或等待连接池超时", retryable=not received_response) from None
-        except httpx.ConnectError:
+        except httpx.ConnectError as error:
+            trace.transport_error_type = type(error).__name__
             raise ProviderConnectionError("模型请求连接失败", retryable=not received_response) from None
-        except httpx.TimeoutException:
+        except httpx.TimeoutException as error:
+            trace.transport_error_type = type(error).__name__
             raise ProviderError("模型请求超时") from None
-        except httpx.HTTPError:
+        except httpx.HTTPError as error:
+            trace.transport_error_type = type(error).__name__
             raise ProviderError("模型请求连接或传输失败") from None
 
         if not received_done or finish_reason is None:

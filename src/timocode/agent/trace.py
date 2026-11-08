@@ -39,6 +39,11 @@ class TraceRecorder:
         self._spans: dict[str, tuple[str, float]] = {}
         self._closed = False
 
+    @property
+    def http_parent_span_id(self) -> str | None:
+        span = next(reversed(self._spans.values()), None)
+        return span[0] if span is not None else None
+
     def _redact(self, text: str) -> str:
         for secret in self._secrets:
             text = text.replace(secret, "[REDACTED]")
