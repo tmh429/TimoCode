@@ -1,4 +1,4 @@
-"""Typer 单次任务入口，复用 AgentSession 和现有代码工具。"""
+"""Typer 任务与交互入口，复用 AgentSession 和现有代码工具。"""
 
 import asyncio
 import sys
@@ -12,6 +12,7 @@ from timocode.agent.context import ContextBudget
 from timocode.agent.loop import DEFAULT_SYSTEM_PROMPT
 from timocode.agent.session import SessionError, SessionStore
 from timocode.agent.session_runtime import AgentSession
+from timocode.interactive import interact, run_turn
 from timocode.llm.config import load_settings
 from timocode.llm.provider import OpenAICompatibleProvider
 from timocode.security.permissions import PermissionManager, confirm_console
@@ -24,13 +25,15 @@ app = typer.Typer(help="TimoCode 终端编程助手", pretty_exceptions_enable=F
 
 
 async def run_task(
-    prompt: str, *, workspace: Path | None, docker_image: str | None,
+    prompt: str | None, *, workspace: Path | None, docker_image: str | None,
     sessions_dir: Path, max_iterations: int, max_tokens: int | None,
     context_window: int | None, trace: bool, trace_dir: Path | None,
     renderer: TerminalRenderer,
 ) -> int:
-    if not prompt.strip():
+    if prompt is not None and not prompt.strip():
         raise ValueError("任务内容不能为空")
+    if prompt is None and not sys.stdin.isatty():
+        raise ValueError("交互模式需要终端输入，请提供任务文本，例如 timo \"解释 Agent Loop\"")
     if docker_image is not None and workspace is None:
         raise ValueError("--docker-image 需要同时指定 --workspace")
     if trace_dir is not None and not trace:
@@ -45,31 +48,26 @@ async def run_task(
     if workspace is not None:
         rules += "文件修改前先读取 sha256。收到 permission_denied 时停止对应操作并向用户说明。"
     async with OpenAICompatibleProvider(settings) as provider:
-        session = await AgentSession.create(
+        new_session = partial(
+            AgentSession.create,
             provider, settings.model, root, store=SessionStore(sessions_dir), tools=tools,
             system_prompt=rules, max_iterations=max_iterations, max_tokens=max_tokens,
             context_budget=budget, on_event=renderer,
             trace_directory=(trace_dir or Path(".timocode/traces")) if trace else None,
             trace_secrets=(settings.api_key.get_secret_value(),),
         )
+        session = await new_session()
         renderer.info(f"[session] {session.session_id}")
         renderer.info(f"[model] {settings.model}")
         renderer.info(f"[workspace] {root}" if workspace is not None else "[tools] 未授权工作目录")
-        try:
-            result = await session.run(prompt)
-        finally:
-            renderer.end_text()
-            if session.trace_path is not None:
-                renderer.info(f"[trace] {session.trace_path}")
-            if session.trace_error is not None:
-                renderer.error(session.trace_error)
-    renderer.finish(result)
-    return 0 if result.status == "completed" else 1
+        if prompt is None:
+            return await interact(session, new_session=new_session, renderer=renderer)
+        return await run_turn(session, prompt, renderer)
 
 
 @app.command()
 def run(
-    prompt: Annotated[str, typer.Argument(help="交给模型的自然语言任务")],
+    prompt: Annotated[str | None, typer.Argument(help="自然语言任务，省略时进入交互模式")] = None,
     workspace: Annotated[Path | None, typer.Option(
         "--workspace", exists=True, file_okay=False, readable=True, help="授权代码工具访问的目录",
     )] = None,
