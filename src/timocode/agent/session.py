@@ -13,7 +13,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Annotated, BinaryIO, Iterator, Literal
 
-from pydantic import AwareDatetime, Field, ValidationError
+from pydantic import AwareDatetime, Field, ValidationError, field_validator
 
 from timocode.llm.schemas import (
     AssistantMessage, DataModel, LLMResponse, Message, ToolCall, ToolMessage, Usage,
@@ -57,6 +57,14 @@ class SessionHeader(DataModel):
     created_at: AwareDatetime
     cwd: str = Field(min_length=1)
     model: str | None = None
+    tool_names: list[str] = Field(default_factory=list)
+
+    @field_validator("tool_names")
+    @classmethod
+    def unique_tool_names(cls, value: list[str]) -> list[str]:
+        if len(set(value)) != len(value):
+            raise ValueError("会话工具名称必须唯一")
+        return value
 
 
 class SessionEntry(DataModel):
@@ -164,8 +172,12 @@ class SessionStore:
 
     async def create(
         self, cwd: str | Path, *, model: str | None = None, session_id: str | None = None,
+        tool_names: list[str] | None = None,
     ) -> SessionSnapshot:
-        return await self._run_io(lambda: self._create(cwd, model=model, session_id=session_id))
+        tool_names = list(tool_names) if tool_names is not None else []
+        return await self._run_io(lambda: self._create(
+            cwd, model=model, session_id=session_id, tool_names=tool_names,
+        ))
 
     async def load(self, session_id: str) -> SessionSnapshot:
         return await self._run_io(lambda: self._load(session_id))
@@ -262,6 +274,7 @@ class SessionStore:
 
     def _create(
         self, cwd: str | Path, *, model: str | None = None, session_id: str | None = None,
+        tool_names: list[str] | None = None,
     ) -> SessionSnapshot:
         session_id = session_id if session_id is not None else uuid.uuid4().hex
         working_directory = Path(cwd).resolve(strict=True)
@@ -270,6 +283,7 @@ class SessionStore:
         header = SessionHeader(
             type="session", version=1, id=session_id,
             created_at=datetime.now(timezone.utc), cwd=str(working_directory), model=model,
+            tool_names=tool_names if tool_names is not None else [],
         )
         with self._locked(session_id):
             path = self._path(session_id)

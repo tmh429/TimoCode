@@ -33,6 +33,7 @@ from timocode.tools.registry import ToolRegistry
 
 
 EventHandler = Callable[[AgentEvent], Awaitable[None]]
+DEFAULT_SYSTEM_PROMPT = "你是编程助手，请依据工具的实际结果回答。"
 
 
 class Agent:
@@ -42,10 +43,11 @@ class Agent:
         model: str,
         *,
         tools: Sequence[Tool] = (),
-        system_prompt: str = "你是编程助手，请依据工具的实际结果回答。",
+        system_prompt: str = DEFAULT_SYSTEM_PROMPT,
         max_iterations: int = 8,
         max_tokens: int | None = None,
         on_event: EventHandler | None = None,
+        initial_messages: Sequence[Message] | None = None,
     ):
         if not model.strip():
             raise ValueError("模型名称不能为空")
@@ -59,7 +61,12 @@ class Agent:
         self.max_tokens = max_tokens
         self.on_event = on_event
         self._registry = ToolRegistry(tools)
-        self._state = AgentState(messages=[SystemMessage(content=system_prompt)])
+        messages = [SystemMessage(content=system_prompt)] if initial_messages is None else [
+            message.model_copy(deep=True) for message in initial_messages
+        ]
+        if not messages:
+            raise ValueError("初始历史不能为空")
+        self._state = AgentState(messages=messages)
         self._executing_call_id: str | None = None
 
     @property
@@ -70,9 +77,9 @@ class Agent:
         if self.on_event is not None:
             await self.on_event(copy.deepcopy(event))
 
-    async def _record(self, message: Message) -> None:
+    async def _record(self, message: Message, *, response: LLMResponse | None = None) -> None:
         self._state.messages.append(message)
-        await self._emit(AgentEvent(type="message_complete", message=message))
+        await self._emit(AgentEvent(type="message_complete", message=message, response=response))
 
     async def _request_response(self) -> LLMResponse:
         request = LLMRequest(
@@ -159,25 +166,34 @@ class Agent:
         return result
 
     async def run(self, user_input: str) -> RunResult:
+        message = UserMessage(content=user_input)
+        if not user_input.strip():
+            raise ValueError("用户输入不能为空白")
+        return await self._run(message)
+
+    async def continue_run(self) -> RunResult:
+        if not isinstance(self._state.messages[-1], (UserMessage, ToolMessage)):
+            raise ValueError("续跑需要以用户消息或工具结果结束的历史")
+        return await self._run(None)
+
+    async def _run(self, message: UserMessage | None) -> RunResult:
         if self._state.is_running:
             raise RuntimeError("同一个 Agent 已有任务运行中")
         if self._state.needs_recovery:
             raise RuntimeError("上次工具执行中断，需要核查副作用并建立新的 Agent")
-        message = UserMessage(content=user_input)
-        if not user_input.strip():
-            raise ValueError("用户输入不能为空白")
         self._state.is_running = True
         self._state.iterations = 0
         usage: list[Usage] = []
         try:
             await self._emit(AgentEvent(type="run_start"))
-            await self._record(message)
+            if message is not None:
+                await self._record(message)
             for _ in range(self.max_iterations):
                 await self._emit(AgentEvent(type="model_request_start"))
                 self._state.iterations += 1
                 response = await self._request_response()
                 usage.append(response.usage)
-                await self._record(response.message)
+                await self._record(response.message, response=response)
                 if response.stop_reason == "length":
                     for call in response.message.tool_calls:
                         await self._record(

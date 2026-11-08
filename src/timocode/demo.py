@@ -5,7 +5,9 @@ import asyncio
 import sys
 from pathlib import Path
 
-from timocode.agent.loop import Agent
+from timocode.agent.loop import DEFAULT_SYSTEM_PROMPT
+from timocode.agent.session import SessionError, SessionStore
+from timocode.agent.session_runtime import AgentSession
 from timocode.agent.state import AgentEvent
 from timocode.llm.config import load_settings
 from timocode.llm.provider import OpenAICompatibleProvider
@@ -25,25 +27,49 @@ async def render(event: AgentEvent) -> None:
         print(f"[tool {state}] {event.message.content}", flush=True)
 
 
-async def run_demo(prompt: str, max_iterations: int, max_tokens: int | None, workspace: Path | None = None) -> int:
+async def run_demo(
+    prompt: str | None, max_iterations: int, max_tokens: int | None,
+    workspace: Path | None = None, resume_id: str | None = None,
+    sessions_dir: Path = Path(".timocode/sessions"),
+) -> int:
     settings = load_settings()
-    tools = [AddTool()] if workspace is None else create_coding_tools(
-        Workspace(workspace), PermissionManager(confirm_console),
-    )
-    prompt_rules = "你是编程助手，请依据工具的实际结果回答。"
-    if workspace is not None:
+    store = SessionStore(sessions_dir)
+    snapshot = await store.load(resume_id) if resume_id is not None else None
+    if snapshot is not None:
+        root = Path(snapshot.header.cwd)
+        if workspace is not None and workspace.resolve(strict=True) != root:
+            raise ValueError("指定工作目录与会话保存目录不一致")
+        names = snapshot.header.tool_names
+        if names == ["add"]:
+            tools = [AddTool()]
+        elif names == ["read_file", "write_file", "edit_file", "list_files", "search_files", "bash"]:
+            tools = create_coding_tools(Workspace(root), PermissionManager(confirm_console))
+        else:
+            raise ValueError("此入口无法重建保存的工具集合，请通过 Python API 明确传入工具")
+    else:
+        root = workspace.resolve(strict=True) if workspace is not None else Path.cwd()
+        tools = [AddTool()] if workspace is None else create_coding_tools(
+            Workspace(root), PermissionManager(confirm_console),
+        )
+    prompt_rules = DEFAULT_SYSTEM_PROMPT
+    if snapshot is None and workspace is not None:
         prompt_rules += "文件修改前先读取 sha256。收到 permission_denied 时停止对应操作并向用户说明。"
     async with OpenAICompatibleProvider(settings) as provider:
-        agent = Agent(
-            provider,
-            settings.model,
-            tools=tools,
-            system_prompt=prompt_rules,
-            max_iterations=max_iterations,
-            max_tokens=max_tokens,
-            on_event=render,
-        )
-        result = await agent.run(prompt)
+        if resume_id is None:
+            session = await AgentSession.create(
+                provider, settings.model, root, store=store, tools=tools,
+                system_prompt=prompt_rules, max_iterations=max_iterations,
+                max_tokens=max_tokens, on_event=render,
+            )
+        else:
+            session = await AgentSession.resume(
+                provider, resume_id, store=store, tools=tools, expected_cwd=root,
+                max_iterations=max_iterations, max_tokens=max_tokens, on_event=render,
+            )
+        print(f"[session] {session.session_id}", flush=True)
+        print(f"[model] {session.snapshot.header.model}", flush=True)
+        print(f"[workspace] {root}", flush=True)
+        result = await session.continue_run() if prompt is None else await session.run(prompt)
     print(f"\n[{result.status}] model requests={result.iterations}")
     if result.error:
         print(result.error, file=sys.stderr)
@@ -52,17 +78,24 @@ async def run_demo(prompt: str, max_iterations: int, max_tokens: int | None, wor
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="TimoCode 工具调用演示")
-    parser.add_argument("prompt", help="交给模型的自然语言任务")
+    parser.add_argument("prompt", nargs="?", help="交给模型的自然语言任务，恢复待回答会话时可省略")
     parser.add_argument("--max-iterations", type=int, default=8)
     parser.add_argument("--max-tokens", type=int)
     parser.add_argument("--workspace", type=Path, help="启用 Coding Tools 并授权指定工作目录")
+    parser.add_argument("--resume", dest="resume_id", help="恢复指定会话 ID")
+    parser.add_argument("--sessions-dir", type=Path, default=Path(".timocode/sessions"), help="会话文件目录")
     args = parser.parse_args()
+    if args.prompt is None and args.resume_id is None:
+        parser.error("需要任务内容或 --resume")
     try:
-        return asyncio.run(run_demo(args.prompt, args.max_iterations, args.max_tokens, args.workspace))
+        return asyncio.run(run_demo(
+            args.prompt, args.max_iterations, args.max_tokens, args.workspace,
+            args.resume_id, args.sessions_dir,
+        ))
     except KeyboardInterrupt:
         print("\n运行已取消。", file=sys.stderr)
         return 130
-    except (ValueError, OSError) as error:
+    except (ValueError, OSError, SessionError) as error:
         print(str(error), file=sys.stderr)
         return 2
 

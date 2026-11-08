@@ -14,7 +14,7 @@ from timocode.security.workspace import Workspace
 from timocode.tools.base import ToolResult
 
 
-SKIP_RECURSION = {".git", ".venv", "__pycache__", ".pytest_cache"}
+SKIP_RECURSION = {".git", ".venv", ".timocode", "__pycache__", ".pytest_cache"}
 
 
 class ListArguments(DataModel):
@@ -66,7 +66,7 @@ class ListFilesTool:
     def definition(self) -> ToolDefinition:
         return ToolDefinition(
             name="list_files",
-            description="列出授权目录结构。递归时跳过 .git、.venv 和 Python 缓存目录，结果数量和深度受限。",
+            description="列出授权目录结构。递归时跳过 .git、.venv、.timocode 和 Python 缓存目录，结果数量和深度受限。",
             parameters=ListArguments.model_json_schema(),
         )
 

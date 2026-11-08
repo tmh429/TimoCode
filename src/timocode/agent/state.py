@@ -4,10 +4,10 @@ from dataclasses import dataclass, field
 from typing import Literal
 
 from timocode.llm.base import ToolCallDelta
-from timocode.llm.schemas import DataModel, Message, ToolCall, Usage
+from timocode.llm.schemas import DataModel, LLMResponse, Message, ToolCall, Usage
 
 
-RunStatus = Literal["completed", "max_iterations", "provider_error", "invalid_response"]
+RunStatus = Literal["completed", "max_iterations", "provider_error", "invalid_response", "storage_error"]
 
 
 class RunResult(DataModel):
@@ -38,3 +38,4 @@ class AgentEvent:
     tool_delta: ToolCallDelta | None = None
     result: RunResult | None = None
     reason: str | None = None
+    response: LLMResponse | None = None
