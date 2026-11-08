@@ -3,6 +3,7 @@
 .env
 .env.*
 !.env.example
+/.timocode/
 
 # Local development plan and learning notes
 /PLAN.md
