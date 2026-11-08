@@ -7,6 +7,7 @@ import select
 import sys
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
+from typing import TextIO
 
 
 @dataclass(frozen=True)
@@ -27,12 +28,13 @@ class PermissionManager:
             raise PermissionError(f"用户未批准 {request.tool} 操作")
 
 
-async def confirm_console(request: PermissionRequest) -> bool:
+async def confirm_console(request: PermissionRequest, *, output: TextIO | None = None) -> bool:
+    output = sys.stdout if output is None else output
     if not sys.stdin.isatty():
         return False
-    print(f"\n[permission] {request.tool}", flush=True)
-    print(json.dumps(request.details, ensure_ascii=False, indent=2), flush=True)
-    print("输入 yes 批准，其他输入拒绝 > ", end="", flush=True)
+    print(f"\n[permission] {request.tool}", file=output, flush=True)
+    print(json.dumps(request.details, ensure_ascii=False, indent=2), file=output, flush=True)
+    print("输入 yes 批准，其他输入拒绝 > ", file=output, end="", flush=True)
     if os.name != "nt":
         while not select.select([sys.stdin], [], [], 0)[0]:
             await asyncio.sleep(0.05)
@@ -51,12 +53,12 @@ async def confirm_console(request: PermissionRequest) -> bool:
         if char in {"\x00", "\xe0"}:
             msvcrt.getwch()
         elif char in {"\r", "\n"}:
-            print(flush=True)
+            print(file=output, flush=True)
             return answer.strip().lower() == "yes"
         elif char == "\b":
             if answer:
                 answer = answer[:-1]
-                print("\b \b", end="", flush=True)
+                print("\b \b", file=output, end="", flush=True)
         elif char.isprintable() and len(answer) < 32:
             answer += char
-            print(char, end="", flush=True)
+            print(char, file=output, end="", flush=True)
