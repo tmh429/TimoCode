@@ -31,7 +31,7 @@ async def conversation_loop(
     read_line: Callable[[], Awaitable[str]], renderer: TerminalRenderer,
     resume_session: Callable[[str], Awaitable[AgentSession]] | None = None,
 ) -> int:
-    renderer.info("输入任务开始对话，/new 新建会话，/resume <会话ID> 恢复会话，/exit 退出。")
+    renderer.info("输入任务开始对话，/new 新建会话，/resume <会话ID> 恢复会话，/status 查看状态，/exit 退出。")
     while True:
         try:
             line = await read_line()
@@ -45,6 +45,12 @@ async def conversation_loop(
             continue
         if text == "/exit":
             return 0
+        if text == "/status":
+            try:
+                renderer.show_status(session)
+            except (SessionError, OSError, ValueError) as error:
+                renderer.error(f"状态读取失败。{error}")
+            continue
         if text == "/new":
             try:
                 replacement = await new_session()
@@ -73,7 +79,7 @@ async def conversation_loop(
             renderer.info(f"[model] {session.snapshot.header.model}")
             continue
         if text.startswith("/"):
-            renderer.error("未知命令。可用命令为 /new、/resume <会话ID> 和 /exit，命令单独占一行。")
+            renderer.error("未知命令。可用命令为 /new、/resume <会话ID>、/status 和 /exit，命令单独占一行。")
             continue
         # 输入文本保留原始缩进，strip 仅用于空白判断与命令识别。
         await run_turn(session, line, renderer)

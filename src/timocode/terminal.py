@@ -6,6 +6,9 @@ from rich.console import Console
 from rich.text import Text
 
 from timocode.agent.state import AgentEvent, RunResult
+from timocode.agent.session import CompactionEntry, SessionEntry
+from timocode.agent.session_runtime import AgentSession
+from timocode.llm.schemas import AssistantMessage, Usage
 
 
 # 模型和工具文本按字面显示，过滤能控制终端的字符，保留换行与制表。
@@ -79,3 +82,49 @@ class TerminalRenderer:
         )
         if result.error:
             self.error(result.error)
+
+    def show_status(self, session: AgentSession) -> None:
+        snapshot = session.snapshot
+        state = session.state
+        report = session.context_report
+        responses = [
+            entry.usage or Usage() for entry in snapshot.entries
+            if isinstance(entry, SessionEntry) and isinstance(entry.message, AssistantMessage)
+        ]
+        summaries = [entry.usage or Usage() for entry in snapshot.entries if isinstance(entry, CompactionEntry)]
+        status = "idle"
+        if state.is_running:
+            status = "running"
+        elif state.needs_recovery:
+            status = "recovery_required"
+        self.info(f"[status] {status}")
+        self.info(f"[session] {snapshot.header.id}")
+        self.info(f"[model] {snapshot.header.model}")
+        self.info(f"[workspace] {snapshot.header.cwd}")
+        self.info(f"[tools] {', '.join(snapshot.header.tool_names) or '无'}")
+        self.info(
+            f"[history] saved messages={len(snapshot.messages)}, "
+            f"context messages={len(snapshot.context_messages)}, sequence={snapshot.last_sequence}"
+        )
+        limit = "未设置" if report.input_limit is None else str(report.input_limit)
+        window = "未设置" if report.context_window is None else str(report.context_window)
+        self.info(
+            f"[context] 当前投影 input~{report.estimate.total}, limit={limit}, window={window}, "
+            f"reserved output={report.reserved_output_tokens}, margin={report.safety_margin_tokens}, "
+            f"fits={report.fits}, method={report.estimate.method}（下一条输入加入前）"
+        )
+        self.info(
+            f"[usage task] saved responses={len(responses)}, "
+            f"reported tokens in={_token_total([usage.input_tokens for usage in responses])}, "
+            f"out={_token_total([usage.output_tokens for usage in responses])}"
+        )
+        self.info(
+            f"[usage summary] saved summaries={len(summaries)}, "
+            f"reported tokens in={_token_total([usage.input_tokens for usage in summaries])}, "
+            f"out={_token_total([usage.output_tokens for usage in summaries])}"
+        )
+        self.info(f"[recovery] pending tools={len(snapshot.pending_tool_calls)}, tail issue={snapshot.tail_issue or '无'}")
+        if session.trace_path is not None:
+            self.info(f"[trace] {session.trace_path}")
+        if session.trace_error is not None:
+            self.error(session.trace_error)

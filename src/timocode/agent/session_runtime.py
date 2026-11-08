@@ -128,6 +128,11 @@ class AgentSession:
         state.needs_recovery |= self._snapshot.needs_recovery or self._storage_unavailable
         return state
 
+    @property
+    def context_report(self) -> ContextReport:
+        """估算当前已加载历史投影，供下一条用户输入加入前查看预算。"""
+        return self._context_report(self._snapshot.context_messages)
+
     def _build_agent(self) -> Agent:
         return Agent(
             self._provider, self._header.model, tools=self._tools,
