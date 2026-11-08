@@ -16,8 +16,9 @@ from typing import Annotated, BinaryIO, Iterator, Literal
 from pydantic import AwareDatetime, Field, ValidationError, field_validator
 
 from timocode.agent.context import ContextBudget
+from timocode.agent.history import check_tool_association
 from timocode.llm.schemas import (
-    AssistantMessage, DataModel, LLMResponse, Message, ToolCall, ToolMessage, Usage,
+    AssistantMessage, DataModel, LLMResponse, Message, ToolCall, Usage,
 )
 from timocode.security.workspace import Workspace
 
@@ -129,20 +130,10 @@ def _check_entry(
                 LLMResponse(message=message, stop_reason=entry.stop_reason)
             except ValidationError:
                 raise SessionCorruptionError("响应停止原因与消息内容不一致") from None
-    if isinstance(message, ToolMessage):
-        call = pending.get(message.tool_call_id)
-        if call is None or call.name != message.name:
-            raise SessionCorruptionError("工具结果缺少对应调用、重复回传或工具名称不匹配")
-        del pending[message.tool_call_id]
-    else:
-        if pending:
-            raise SessionCorruptionError("工具调用尚缺结果，不能插入其他消息")
-        if isinstance(message, AssistantMessage):
-            for call in message.tool_calls:
-                if call.id in call_ids:
-                    raise SessionCorruptionError("工具调用 ID 重复")
-                call_ids.add(call.id)
-                pending[call.id] = call
+    try:
+        check_tool_association(message, pending, call_ids)
+    except ValueError as error:
+        raise SessionCorruptionError(str(error)) from None
     entry_ids.add(entry.id)
 
 
