@@ -6,7 +6,6 @@ from rich.console import Console
 from rich.console import Group
 from rich.panel import Panel
 from rich.status import Status
-from rich.table import Table
 from rich.text import Text
 
 from timocode.agent.state import AgentEvent, RunResult
@@ -73,20 +72,23 @@ class TerminalRenderer:
                 self.activity(previous)
 
     def welcome(self, session: AgentSession) -> None:
-        mascot = Text("   .----.\n  [ o  o ]\n  [  --  ]\n   '----'\n   /|  |\\", style="bold cyan")
+        banner = r""" _____ _                   ____          _
+|_   _(_)_ __ ___   ___    / ___|___   __| | ___
+  | | | | '_ ` _ \ / _ \  | |   / _ \ / _` |/ _ \
+  | | | | | | | | | (_) | | |__| (_) | (_| |  __/
+  |_| |_|_| |_| |_|\___/   \____\___/ \__,_|\___|"""
+        if max(len(line) for line in banner.splitlines()) > self.diagnostics.width - 6:
+            banner = "Timo Code"
         details = literal_text(
-            f"TimoCode\n\n模型  {session.model}\n目录  {session.snapshot.header.cwd}\n会话  {session.session_id}"
+            f"\n模型  {session.model}\n目录  {session.snapshot.header.cwd}\n会话  {session.session_id}"
         )
-        header = Table.grid(padding=(0, 2), expand=True)
-        header.add_column(width=12, no_wrap=True)
-        header.add_column(ratio=1, overflow="fold")
-        header.add_row(mascot, details)
         body = Group(
-            header,
+            Text(banner, style="bold cyan"),
+            details,
             Text("\n输入任务开始对话 · ↑/↓ 选择审批 · Enter 确认", style="dim"),
             Text("/new  /resume  /model  /compact  /status  /exit", style="dim"),
         )
-        self.diagnostics.print(Panel(body, title="timo", border_style="cyan", padding=(1, 2)))
+        self.diagnostics.print(Panel(body, title="Timo Code", border_style="cyan", padding=(1, 2)))
 
     def end_text(self) -> None:
         if self._line_open:
