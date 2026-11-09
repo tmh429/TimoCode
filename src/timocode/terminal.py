@@ -72,11 +72,11 @@ class TerminalRenderer:
                 self.activity(previous)
 
     def welcome(self, session: AgentSession) -> None:
-        banner = r""" _____ _                   ____          _
-|_   _(_)_ __ ___   ___    / ___|___   __| | ___
-  | | | | '_ ` _ \ / _ \  | |   / _ \ / _` |/ _ \
-  | | | | | | | | | (_) | | |__| (_) | (_| |  __/
-  |_| |_|_| |_| |_|\___/   \____\___/ \__,_|\___|"""
+        banner = """█████ █████ █   █  ███     ████  ███  ████  █████
+  █     █   ██ ██ █   █   █     █   █ █   █ █
+  █     █   █ █ █ █   █   █     █   █ █   █ ████
+  █     █   █   █ █   █   █     █   █ █   █ █
+  █   █████ █   █  ███     ████  ███  ████  █████"""
         if max(len(line) for line in banner.splitlines()) > self.diagnostics.width - 6:
             banner = "Timo Code"
         details = literal_text(
