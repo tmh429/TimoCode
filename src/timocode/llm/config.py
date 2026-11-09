@@ -1,4 +1,4 @@
-"""显式读取本地配置，不修改进程环境。"""
+"""读取用户、项目与显式指定的模型配置。"""
 
 import os
 from pathlib import Path
@@ -11,9 +11,12 @@ from timocode.llm.schemas import DataModel
 from timocode.llm.retry import RetryPolicy
 
 
+DEFAULT_BASE_URL = "https://api.openai.com/v1"
+
+
 class LLMSettings(DataModel):
     api_key: SecretStr
-    base_url: str = "https://api.openai.com/v1"
+    base_url: str = DEFAULT_BASE_URL
     model: str = Field(min_length=1)
     timeout: float = Field(default=60.0, gt=0)
     retry_policy: RetryPolicy = Field(default_factory=RetryPolicy)
@@ -51,8 +54,26 @@ class LLMSettings(DataModel):
         return value
 
 
-def load_settings(env_file: str | Path = ".env") -> LLMSettings:
-    local = dotenv_values(env_file, interpolate=False)
+def user_config_file() -> Path:
+    return Path.home() / ".timocode" / "config.env"
+
+
+def load_settings(env_file: str | Path | None = None) -> LLMSettings:
+    if env_file is None:
+        local = dict(dotenv_values(user_config_file(), interpolate=False))
+        project = dotenv_values(".env", interpolate=False)
+        user_url = local.get("OPENAI_BASE_URL") or DEFAULT_BASE_URL
+        project_url = project.get("OPENAI_BASE_URL")
+        if (
+            project_url is not None
+            and project_url.strip().rstrip("/") != user_url.strip().rstrip("/")
+            and not os.environ.get("OPENAI_BASE_URL")
+        ):
+            # 项目切换服务时，从项目配置或显式进程环境获取对应凭据。
+            local.pop("OPENAI_API_KEY", None)
+        local.update(project)
+    else:
+        local = dotenv_values(env_file, interpolate=False)
     names = {
         "api_key": "OPENAI_API_KEY",
         "base_url": "OPENAI_BASE_URL",
