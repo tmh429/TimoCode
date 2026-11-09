@@ -29,6 +29,7 @@ async def run_task(
     sessions_dir: Path, max_iterations: int, max_tokens: int | None,
     context_window: int | None, trace: bool, trace_dir: Path | None,
     renderer: TerminalRenderer, env_file: Path | None = None,
+    summary_context_window: int = 32000, summary_output_tokens: int = 2048,
 ) -> int:
     if prompt is not None and not prompt.strip():
         raise ValueError("任务内容不能为空")
@@ -39,6 +40,9 @@ async def run_task(
     if trace_dir is not None and not trace:
         raise ValueError("--trace-dir 需要同时指定 --trace")
     budget = None if context_window is None else ContextBudget(context_window=context_window)
+    summary_budget = ContextBudget(
+        context_window=summary_context_window, reserve_output_tokens=summary_output_tokens,
+    )
     root = Path.cwd() if workspace is None else workspace.resolve(strict=True)
     tools = [] if workspace is None else create_coding_tools(
         Workspace(root), PermissionManager(partial(confirm_console, output=sys.stderr)), docker_image=docker_image,
@@ -76,6 +80,7 @@ async def run_task(
         if prompt is None:
             return await interact(
                 session, new_session=new_session, resume_session=resume_session, renderer=renderer,
+                summary_budget=summary_budget,
             )
         return await run_turn(session, prompt, renderer)
 
@@ -96,6 +101,8 @@ def run(
     env_file: Annotated[Path | None, typer.Option(
         "--env-file", exists=True, dir_okay=False, readable=True, help="模型配置文件，默认启动目录的 .env",
     )] = None,
+    summary_context_window: Annotated[int, typer.Option(min=1, help="独立摘要请求的上下文窗口")] = 32000,
+    summary_output_tokens: Annotated[int, typer.Option(min=1, help="独立摘要请求的输出预留")] = 2048,
 ) -> None:
     renderer = TerminalRenderer()
     try:
@@ -104,6 +111,7 @@ def run(
             sessions_dir=sessions_dir, max_iterations=max_iterations, max_tokens=max_tokens,
             context_window=context_window, trace=trace, trace_dir=trace_dir, renderer=renderer,
             env_file=env_file,
+            summary_context_window=summary_context_window, summary_output_tokens=summary_output_tokens,
         ))
     except (KeyboardInterrupt, asyncio.CancelledError):
         renderer.error("运行已取消。")

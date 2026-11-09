@@ -10,6 +10,9 @@ from prompt_toolkit.output import create_output
 
 from timocode.agent.session import SessionError
 from timocode.agent.session_runtime import AgentSession
+from timocode.agent.context import ContextBudget
+from timocode.agent.summarization import SummaryError
+from timocode.llm.base import ProviderError
 from timocode.terminal import TerminalRenderer
 
 
@@ -30,8 +33,9 @@ async def conversation_loop(
     session: AgentSession, *, new_session: Callable[[], Awaitable[AgentSession]],
     read_line: Callable[[], Awaitable[str]], renderer: TerminalRenderer,
     resume_session: Callable[[str], Awaitable[AgentSession]] | None = None,
+    summary_budget: ContextBudget | None = None,
 ) -> int:
-    renderer.info("输入任务开始对话，/new 新建会话，/resume <会话ID> 恢复会话，/model [名称] 查看或切换模型，/status 查看状态，/exit 退出。")
+    renderer.info("输入任务开始对话，/new 新建会话，/resume <会话ID> 恢复会话，/model [名称] 查看或切换模型，/compact [保留回合数] 压缩历史，/status 查看状态，/exit 退出。")
     while True:
         try:
             line = await read_line()
@@ -62,6 +66,30 @@ async def conversation_loop(
             renderer.info(f"[model] {session.model}")
             continue
         parts = text.split()
+        if parts[0] == "/compact":
+            try:
+                if len(parts) > 2:
+                    raise ValueError("参数过多")
+                keep_recent_turns = int(parts[1]) if len(parts) == 2 else 2
+                if keep_recent_turns < 1:
+                    raise ValueError("保留回合数必须为正整数")
+            except ValueError:
+                renderer.error("用法为 /compact [保留回合数]，回合数必须为正整数，默认 2。")
+                continue
+            if summary_budget is None:
+                renderer.error("当前交互入口未配置独立摘要预算。")
+                continue
+            try:
+                await session.compact(summary_budget=summary_budget, keep_recent_turns=keep_recent_turns)
+            except (SummaryError, ProviderError, SessionError, OSError, ValueError) as error:
+                renderer.error(f"历史压缩失败。{error}")
+            finally:
+                renderer.end_text()
+                if session.trace_path is not None:
+                    renderer.info(f"[trace] {session.trace_path}")
+                if session.trace_error is not None:
+                    renderer.error(session.trace_error)
+            continue
         if parts[0] == "/model":
             if len(parts) > 2:
                 renderer.error("用法为 /model 或 /model <模型名称>。")
@@ -91,7 +119,7 @@ async def conversation_loop(
             renderer.info(f"[model] {session.model}")
             continue
         if text.startswith("/"):
-            renderer.error("未知命令。可用命令为 /new、/resume <会话ID>、/model [名称]、/status 和 /exit，命令单独占一行。")
+            renderer.error("未知命令。可用命令为 /new、/resume <会话ID>、/model [名称]、/compact [保留回合数]、/status 和 /exit，命令单独占一行。")
             continue
         # 输入文本保留原始缩进，strip 仅用于空白判断与命令识别。
         await run_turn(session, line, renderer)
@@ -101,6 +129,7 @@ async def interact(
     session: AgentSession, *, new_session: Callable[[], Awaitable[AgentSession]],
     renderer: TerminalRenderer,
     resume_session: Callable[[str], Awaitable[AgentSession]] | None = None,
+    summary_budget: ContextBudget | None = None,
 ) -> int:
     with closing(create_input(stdin=sys.stdin)) as terminal_input:
         prompt = PromptSession(input=terminal_input, output=create_output(stdout=sys.stderr))
@@ -108,4 +137,5 @@ async def interact(
             session, new_session=new_session,
             read_line=lambda: prompt.prompt_async("timo> "), renderer=renderer,
             resume_session=resume_session,
+            summary_budget=summary_budget,
         )

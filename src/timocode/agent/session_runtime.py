@@ -179,17 +179,37 @@ class AgentSession:
         return report
 
     async def compact(
-        self, summarizer: SummaryGenerator, *, keep_recent_turns: int = 2,
+        self, summarizer: SummaryGenerator | None = None, *, keep_recent_turns: int = 2,
+        summary_budget: ContextBudget | None = None,
     ) -> ContextReport | None:
         """手动压缩完整旧前缀，采纳前检查长度与预算，提交后重建 Agent。"""
+        if summarizer is None and summary_budget is None:
+            raise ValueError("请提供摘要生成器或独立摘要预算")
+        if summarizer is not None and summary_budget is not None:
+            raise ValueError("摘要生成器和独立摘要预算只能提供一个")
         async with self._execution("compact"):
             try:
                 await self._reload()
                 self._require_ready(self._snapshot)
+                if summarizer is None:
+                    summarizer = SummaryGenerator(
+                        self._provider, self.model, context_budget=summary_budget,
+                        token_estimator=self._token_estimator,
+                    )
+                before = self.context_report
+                await self._handle_event(AgentEvent(type="compaction_start", context_report=before))
                 report = await self._compact_snapshot(summarizer, keep_recent_turns=keep_recent_turns)
                 self._agent = self._build_agent()
+                await self._handle_event(AgentEvent(
+                    type="compaction_end", reason="skipped" if report is None else "compacted",
+                    context_report=before if report is None else report,
+                ))
                 return report
-            except (Exception, asyncio.CancelledError):
+            except Exception as error:
+                await self._reload_after_failure()
+                await self._handle_event(AgentEvent(type="compaction_failed", reason=str(error)))
+                raise
+            except asyncio.CancelledError:
                 await self._reload_after_failure()
                 raise
 

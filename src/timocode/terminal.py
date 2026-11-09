@@ -65,9 +65,13 @@ class TerminalRenderer:
             limit = "未设置" if report.input_limit is None else str(report.input_limit)
             self.info(f"[context] input~{report.estimate.total}, limit={limit}")
         elif event.type == "compaction_start":
-            self.info("[compaction] 正在生成历史摘要")
+            self.info("[compaction] 正在生成历史摘要或检查可压缩范围")
+            if event.context_report is not None:
+                self.info(f"[context before compaction] input~{event.context_report.estimate.total}")
         elif event.type == "compaction_end":
             self.info(f"[compaction] {event.reason}")
+            if event.context_report is not None:
+                self.info(f"[context after compaction] input~{event.context_report.estimate.total}")
         elif event.type == "compaction_failed":
             self.error(f"[compaction failed] {event.reason}")
         elif event.type == "run_end":
