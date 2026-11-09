@@ -20,6 +20,7 @@ async def run_turn(session: AgentSession, prompt: str, renderer: TerminalRendere
     try:
         result = await session.run(prompt)
     finally:
+        renderer.stop_activity()
         renderer.end_text()
         if session.trace_path is not None:
             renderer.info(f"[trace] {session.trace_path}")
@@ -35,7 +36,6 @@ async def conversation_loop(
     resume_session: Callable[[str], Awaitable[AgentSession]] | None = None,
     summary_budget: ContextBudget | None = None,
 ) -> int:
-    renderer.info("输入任务开始对话，/new 新建会话，/resume <会话ID> 恢复会话，/model [名称] 查看或切换模型，/compact [保留回合数] 压缩历史，/status 查看状态，/exit 退出。")
     while True:
         try:
             line = await read_line()
@@ -84,6 +84,7 @@ async def conversation_loop(
             except (SummaryError, ProviderError, SessionError, OSError, ValueError) as error:
                 renderer.error(f"历史压缩失败。{error}")
             finally:
+                renderer.stop_activity()
                 renderer.end_text()
                 if session.trace_path is not None:
                     renderer.info(f"[trace] {session.trace_path}")

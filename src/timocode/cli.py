@@ -16,7 +16,8 @@ from timocode.agent.session_runtime import AgentSession
 from timocode.interactive import interact, run_turn
 from timocode.llm.config import load_settings
 from timocode.llm.provider import OpenAICompatibleProvider
-from timocode.security.permissions import PermissionManager, confirm_console
+from timocode.security.permissions import PermissionManager
+from timocode.approval import confirm_console
 from timocode.security.workspace import Workspace
 from timocode.terminal import TerminalRenderer
 from timocode.tools.coding import create_coding_tools
@@ -66,8 +67,13 @@ async def run_task(
         context_window=summary_context_window, reserve_output_tokens=summary_output_tokens,
     )
     root = Path.cwd() if workspace is None else workspace.resolve(strict=True)
+
+    async def approve(request):
+        with renderer.suspend_activity():
+            return await confirm_console(request, output=sys.stderr)
+
     tools = [] if workspace is None else create_coding_tools(
-        Workspace(root), PermissionManager(partial(confirm_console, output=sys.stderr)), docker_image=docker_image,
+        Workspace(root), PermissionManager(approve), docker_image=docker_image,
     )
     settings = load_settings() if env_file is None else load_settings(env_file)
     rules = DEFAULT_SYSTEM_PROMPT
@@ -98,14 +104,13 @@ async def run_task(
         session = await resume_recent(store, resume_session, renderer) if auto_resume else None
         if session is None:
             session = await new_session()
-        renderer.info(f"[session] {session.session_id}")
-        renderer.info(f"[model] {session.model}")
-        renderer.info(f"[workspace] {root}" if workspace is not None else "[tools] 未授权工作目录")
         if prompt is None:
+            renderer.welcome(session)
             return await interact(
                 session, new_session=new_session, resume_session=resume_session, renderer=renderer,
                 summary_budget=summary_budget,
             )
+        renderer.info(f"TimoCode · {session.model}")
         return await run_turn(session, prompt, renderer)
 
 

@@ -1,8 +1,12 @@
 """消费 Agent 事件，用 Rich 展示流式文本和运行诊断。"""
 
-import json
+from contextlib import contextmanager
 
 from rich.console import Console
+from rich.console import Group
+from rich.panel import Panel
+from rich.status import Status
+from rich.table import Table
 from rich.text import Text
 
 from timocode.agent.state import AgentEvent, RunResult
@@ -15,6 +19,10 @@ from timocode.llm.schemas import AssistantMessage, Usage
 _CONTROL_CHARACTERS = dict.fromkeys(
     [value for value in range(32) if value not in (9, 10)] + list(range(127, 160)),
 )
+
+
+def literal_text(value: str, *, style: str = "") -> Text:
+    return Text(value.translate(_CONTROL_CHARACTERS), style=style)
 
 
 def _token_total(values: list[int | None]) -> str:
@@ -30,9 +38,55 @@ class TerminalRenderer:
         self.output = output if output is not None else Console()
         self.diagnostics = diagnostics if diagnostics is not None else Console(stderr=True)
         self._line_open = False
+        self._activity: Status | None = None
+        self._activity_text: str | None = None
 
     def _print(self, console: Console, value: str, *, style: str = "", end: str = "\n") -> None:
-        console.print(Text(value.translate(_CONTROL_CHARACTERS), style=style), end=end, soft_wrap=True)
+        console.print(literal_text(value, style=style), end=end, soft_wrap=True)
+
+    def activity(self, value: str) -> None:
+        self.end_text()
+        self._activity_text = value
+        if not self.diagnostics.is_terminal:
+            self._print(self.diagnostics, value, style="cyan")
+            return
+        if self._activity is None:
+            self._activity = self.diagnostics.status(literal_text(value), spinner="dots")
+            self._activity.start()
+        else:
+            self._activity.update(literal_text(value))
+
+    def stop_activity(self) -> None:
+        if self._activity is not None:
+            self._activity.stop()
+            self._activity = None
+        self._activity_text = None
+
+    @contextmanager
+    def suspend_activity(self):
+        previous = self._activity_text
+        self.stop_activity()
+        try:
+            yield
+        finally:
+            if previous is not None:
+                self.activity(previous)
+
+    def welcome(self, session: AgentSession) -> None:
+        mascot = Text("   .----.\n  [ o  o ]\n  [  --  ]\n   '----'\n   /|  |\\", style="bold cyan")
+        details = literal_text(
+            f"TimoCode\n\n模型  {session.model}\n目录  {session.snapshot.header.cwd}\n会话  {session.session_id}"
+        )
+        header = Table.grid(padding=(0, 2), expand=True)
+        header.add_column(width=12, no_wrap=True)
+        header.add_column(ratio=1, overflow="fold")
+        header.add_row(mascot, details)
+        body = Group(
+            header,
+            Text("\n输入任务开始对话 · ↑/↓ 选择审批 · Enter 确认", style="dim"),
+            Text("/new  /resume  /model  /compact  /status  /exit", style="dim"),
+        )
+        self.diagnostics.print(Panel(body, title="timo", border_style="cyan", padding=(1, 2)))
 
     def end_text(self) -> None:
         if self._line_open:
@@ -40,50 +94,47 @@ class TerminalRenderer:
             self._line_open = False
 
     def info(self, value: str) -> None:
+        self.stop_activity()
         self.end_text()
         self._print(self.diagnostics, value, style="dim")
 
     def error(self, value: str) -> None:
+        self.stop_activity()
         self.end_text()
         self._print(self.diagnostics, value, style="red")
 
     async def __call__(self, event: AgentEvent) -> None:
-        if event.type == "text_delta":
-            text = event.delta or ""
-            self._print(self.output, text, end="")
-            if text:
-                self._line_open = not text.endswith("\n")
+        if event.type == "model_request_start":
+            self.activity("思考中…")
+        elif event.type == "message_complete" and isinstance(event.message, AssistantMessage):
+            message = event.message
+            if not message.tool_calls and message.content:
+                self.stop_activity()
+                self._print(self.output, message.content, end="")
+                self._line_open = not message.content.endswith("\n")
+                self.end_text()
         elif event.type == "tool_start":
             call = event.tool_call
-            self.info(f"[tool] {call.name} {json.dumps(call.arguments, ensure_ascii=False)}")
+            labels = {
+                "read_file": "正在读取文件", "list_files": "正在查看目录", "search_files": "正在搜索代码",
+                "write_file": "正在写入文件", "edit_file": "正在修改文件",
+                "bash": "正在执行命令", "docker_shell": "正在执行隔离命令",
+            }
+            self.activity(labels.get(call.name, "正在使用工具") + "…")
         elif event.type == "tool_end":
-            state = "error" if event.message.is_error else "ok"
-            self.info(f"[tool {state}] {event.tool_call.name}")
-            self._print(self.diagnostics, event.message.content)
-        elif event.type == "context_checked":
-            report = event.context_report
-            limit = "未设置" if report.input_limit is None else str(report.input_limit)
-            self.info(f"[context] input~{report.estimate.total}, limit={limit}")
+            self.activity("工具执行失败，正在调整…" if event.message.is_error else "正在整理结果…")
         elif event.type == "compaction_start":
-            self.info("[compaction] 正在生成历史摘要或检查可压缩范围")
-            if event.context_report is not None:
-                self.info(f"[context before compaction] input~{event.context_report.estimate.total}")
+            self.activity("正在生成历史摘要…")
         elif event.type == "compaction_end":
-            self.info(f"[compaction] {event.reason}")
-            if event.context_report is not None:
-                self.info(f"[context after compaction] input~{event.context_report.estimate.total}")
+            self.info("上下文压缩完成" if event.reason == "compacted" else "当前历史无需压缩")
         elif event.type == "compaction_failed":
             self.error(f"[compaction failed] {event.reason}")
         elif event.type == "run_end":
+            self.stop_activity()
             self.end_text()
 
     def finish(self, result: RunResult) -> None:
-        input_tokens = _token_total([usage.input_tokens for usage in result.usage])
-        output_tokens = _token_total([usage.output_tokens for usage in result.usage])
-        self.info(
-            f"[{result.status}] model requests={result.iterations}, "
-            f"reported tokens in={input_tokens}, out={output_tokens}"
-        )
+        self.info(f"[{result.status}] " + ("已完成" if result.status == "completed" else "任务已结束"))
         if result.error:
             self.error(result.error)
 
