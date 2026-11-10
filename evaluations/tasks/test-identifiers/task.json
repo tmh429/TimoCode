@@ -1,0 +1,17 @@
+{
+  "schema_version": 1,
+  "id": "test-identifiers",
+  "category": "testing",
+  "instruction": "为 validators.is_identifier(text) 编写测试。合法值只含 ASCII 字母、数字、下划线，首字符不得为数字，并且不能是 Python keyword.iskeyword 判定的关键字。返回 bool。 在 tests/ 下新增标准库 unittest 测试，至少 3 个独立测试方法，文件名为 test_*.py。保持所有原有文件不变。验收会检查测试对正确实现通过，并能发现常见缺陷版本。",
+  "initial_files": {
+    "validators.py": "import keyword\nimport re\n\ndef is_identifier(text):\n    return bool(re.fullmatch(r'[A-Za-z_][A-Za-z0-9_]*', text)) and not keyword.iskeyword(text)\n",
+    "tests/__init__.py": ""
+  },
+  "verifier": "verify.py",
+  "limits": {
+    "max_iterations": 20,
+    "timeout_seconds": 180,
+    "max_total_tokens": 48000,
+    "verification_timeout_seconds": 30
+  }
+}

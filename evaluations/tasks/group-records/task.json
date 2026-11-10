@@ -1,0 +1,16 @@
+{
+  "schema_version": 1,
+  "id": "group-records",
+  "category": "code_change",
+  "instruction": "实现 records.py 的 group_records(rows, key)。rows 为字典列表，分组键对应的值可哈希。返回以该值为键、原始行引用列表为值的字典，保留组首次出现顺序和组内顺序。不修改输入，缺少 key 的行抛 KeyError，空输入返回空字典。",
+  "initial_files": {
+    "records.py": "def group_records(rows, key):\n    raise NotImplementedError\n"
+  },
+  "verifier": "verify.py",
+  "limits": {
+    "max_iterations": 20,
+    "timeout_seconds": 180,
+    "max_total_tokens": 48000,
+    "verification_timeout_seconds": 30
+  }
+}

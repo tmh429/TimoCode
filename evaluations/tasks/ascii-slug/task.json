@@ -1,0 +1,16 @@
+{
+  "schema_version": 1,
+  "id": "ascii-slug",
+  "category": "code_change",
+  "instruction": "实现 slug.py 的 slugify(text)。先使用 Unicode NFKD 分解并忽略不能编码为 ASCII 的字符，再转小写；连续非 ASCII 字母或数字转换成一个连字符，去掉首尾连字符。空结果返回空字符串。只用标准库。",
+  "initial_files": {
+    "slug.py": "def slugify(text):\n    raise NotImplementedError\n"
+  },
+  "verifier": "verify.py",
+  "limits": {
+    "max_iterations": 20,
+    "timeout_seconds": 180,
+    "max_total_tokens": 48000,
+    "verification_timeout_seconds": 30
+  }
+}

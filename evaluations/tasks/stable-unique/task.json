@@ -1,0 +1,16 @@
+{
+  "schema_version": 1,
+  "id": "stable-unique",
+  "category": "bug_fix",
+  "instruction": "修复 unique.py 的 stable_unique(values)。values 为可哈希值组成的列表，按 Python 的相等与哈希语义去重，保留第一次出现的顺序，返回新列表，不修改输入。支持空列表、字符串、整数和 None。",
+  "initial_files": {
+    "unique.py": "def stable_unique(values):\n    return sorted(set(values))\n"
+  },
+  "verifier": "verify.py",
+  "limits": {
+    "max_iterations": 20,
+    "timeout_seconds": 180,
+    "max_total_tokens": 48000,
+    "verification_timeout_seconds": 30
+  }
+}

@@ -1,0 +1,17 @@
+{
+  "schema_version": 1,
+  "id": "public-mean-export",
+  "category": "multi_file",
+  "instruction": "实现 statsmini/functions.py 的 mean(values)，并通过 statsmini/__init__.py 导出同一个函数，使 from statsmini import mean 可用。values 为数值序列，返回算术平均值，空序列抛 ValueError，不修改输入。保持标准库实现。",
+  "initial_files": {
+    "statsmini/__init__.py": "",
+    "statsmini/functions.py": "def mean(values):\n    return 0\n"
+  },
+  "verifier": "verify.py",
+  "limits": {
+    "max_iterations": 20,
+    "timeout_seconds": 180,
+    "max_total_tokens": 48000,
+    "verification_timeout_seconds": 30
+  }
+}

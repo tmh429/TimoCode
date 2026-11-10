@@ -1,0 +1,19 @@
+{
+  "schema_version": 1,
+  "id": "find-effective-flags",
+  "category": "retrieval",
+  "instruction": "阅读 settings.py，按其逻辑求 production 环境的最终配置。创建 answer.json，包含 enabled 和 max_jobs，分别保留布尔值和整数类型。保持原有文件不变。",
+  "initial_files": {
+    "settings.py": "import json\nfrom pathlib import Path\n\ndef load(environment):\n    base = json.loads(Path('config/defaults.json').read_text())\n    base.update(json.loads(Path(f'config/{environment}.json').read_text()))\n    return base\n",
+    "config/defaults.json": "{\"enabled\": false, \"max_jobs\": 2}\n",
+    "config/production.json": "{\"enabled\": true}\n",
+    "config/development.json": "{\"enabled\": false, \"max_jobs\": 8}\n"
+  },
+  "verifier": "verify.py",
+  "limits": {
+    "max_iterations": 20,
+    "timeout_seconds": 180,
+    "max_total_tokens": 48000,
+    "verification_timeout_seconds": 30
+  }
+}

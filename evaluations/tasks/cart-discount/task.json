@@ -1,0 +1,18 @@
+{
+  "schema_version": 1,
+  "id": "cart-discount",
+  "category": "multi_file",
+  "instruction": "完成 shop/discounts.py 的 apply_discount(amount, percent) 和 shop/cart.py 的 total(items, percent=0)。折扣百分比为 0 到 100，越界抛 ValueError；返回 round(amount * (1 - percent / 100), 2)。total 对每项 price * quantity 求和后应用折扣，空购物车为 0，必须支持 percent 参数。不得修改 items。",
+  "initial_files": {
+    "shop/__init__.py": "",
+    "shop/discounts.py": "def apply_discount(amount, percent):\n    return amount\n",
+    "shop/cart.py": "from .discounts import apply_discount\n\ndef total(items):\n    return sum(item['price'] * item['quantity'] for item in items)\n"
+  },
+  "verifier": "verify.py",
+  "limits": {
+    "max_iterations": 20,
+    "timeout_seconds": 180,
+    "max_total_tokens": 48000,
+    "verification_timeout_seconds": 30
+  }
+}

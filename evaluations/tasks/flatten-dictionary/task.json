@@ -1,0 +1,16 @@
+{
+  "schema_version": 1,
+  "id": "flatten-dictionary",
+  "category": "code_change",
+  "instruction": "实现 flatten.py 的 flatten_dict(data)。输入是嵌套字典，所有键为不含点号的非空字符串；使用点号连接路径，仅递归展开非空字典，空字典、列表和其他值作为叶子。顶层空字典返回空字典，不修改输入。",
+  "initial_files": {
+    "flatten.py": "def flatten_dict(data):\n    raise NotImplementedError\n"
+  },
+  "verifier": "verify.py",
+  "limits": {
+    "max_iterations": 20,
+    "timeout_seconds": 180,
+    "max_total_tokens": 48000,
+    "verification_timeout_seconds": 30
+  }
+}

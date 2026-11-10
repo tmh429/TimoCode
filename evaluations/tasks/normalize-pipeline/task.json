@@ -1,0 +1,18 @@
+{
+  "schema_version": 1,
+  "id": "normalize-pipeline",
+  "category": "multi_file",
+  "instruction": "完成 people/transform.py 的 parse_row(row) 和 people/pipeline.py 的 process_rows(rows)。row 是字典，name 为字符串，age 可由 int 转换。去除 name 两端空白并将 age 转成整数。缺少字段、空白姓名、age 无法转换或为负时 parse_row 返回 None。有效行只返回 name、age 两个字段。process_rows 过滤无效行，保持有效行顺序。不得修改任何输入。",
+  "initial_files": {
+    "people/__init__.py": "",
+    "people/transform.py": "def parse_row(row):\n    return row\n",
+    "people/pipeline.py": "from .transform import parse_row\n\ndef process_rows(rows):\n    return rows\n"
+  },
+  "verifier": "verify.py",
+  "limits": {
+    "max_iterations": 20,
+    "timeout_seconds": 180,
+    "max_total_tokens": 48000,
+    "verification_timeout_seconds": 30
+  }
+}

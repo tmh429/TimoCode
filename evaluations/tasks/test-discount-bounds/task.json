@@ -1,0 +1,17 @@
+{
+  "schema_version": 1,
+  "id": "test-discount-bounds",
+  "category": "testing",
+  "instruction": "为 pricing.apply_discount(price, percent) 编写测试。price 不得为负，percent 范围为 0 到 100，非法输入抛 ValueError；返回 round(price * (1 - percent / 100), 2)。 在 tests/ 下新增标准库 unittest 测试，至少 3 个独立测试方法，文件名为 test_*.py。保持所有原有文件不变。验收会检查测试对正确实现通过，并能发现常见缺陷版本。",
+  "initial_files": {
+    "pricing.py": "def apply_discount(price, percent):\n    if price < 0 or not 0 <= percent <= 100:\n        raise ValueError('invalid input')\n    return round(price * (1 - percent / 100), 2)\n",
+    "tests/__init__.py": ""
+  },
+  "verifier": "verify.py",
+  "limits": {
+    "max_iterations": 20,
+    "timeout_seconds": 180,
+    "max_total_tokens": 48000,
+    "verification_timeout_seconds": 30
+  }
+}

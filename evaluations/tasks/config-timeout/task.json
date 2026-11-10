@@ -1,0 +1,18 @@
+{
+  "schema_version": 1,
+  "id": "config-timeout",
+  "category": "multi_file",
+  "instruction": "扩展 service/settings.py 与 service/cli.py。load_settings(env) 保留现有 host 规则，并返回整数 timeout。APP_TIMEOUT 可通过 int 转为正整数时采用该值，缺失、无法转换或非正时使用 30。render_config(env) 返回包含 host 和 timeout 的 JSON 字符串。保持函数签名。",
+  "initial_files": {
+    "service/__init__.py": "",
+    "service/settings.py": "def load_settings(env):\n    return {'host': env.get('APP_HOST', 'localhost')}\n",
+    "service/cli.py": "import json\nfrom .settings import load_settings\n\ndef render_config(env):\n    settings = load_settings(env)\n    return json.dumps({'host': settings['host']})\n"
+  },
+  "verifier": "verify.py",
+  "limits": {
+    "max_iterations": 20,
+    "timeout_seconds": 180,
+    "max_total_tokens": 48000,
+    "verification_timeout_seconds": 30
+  }
+}

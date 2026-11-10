@@ -1,0 +1,17 @@
+{
+  "schema_version": 1,
+  "id": "test-safe-divide",
+  "category": "testing",
+  "instruction": "为 math_utils.safe_divide(a, b) 编写测试。其约定是除数为零返回 None，否则返回普通除法结果，支持负数和非整数结果。 在 tests/ 下新增标准库 unittest 测试，至少 3 个独立测试方法，文件名为 test_*.py。保持所有原有文件不变。验收会检查测试对正确实现通过，并能发现常见缺陷版本。",
+  "initial_files": {
+    "math_utils.py": "def safe_divide(a, b):\n    return None if b == 0 else a / b\n",
+    "tests/__init__.py": ""
+  },
+  "verifier": "verify.py",
+  "limits": {
+    "max_iterations": 20,
+    "timeout_seconds": 180,
+    "max_total_tokens": 48000,
+    "verification_timeout_seconds": 30
+  }
+}

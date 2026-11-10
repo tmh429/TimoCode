@@ -109,8 +109,11 @@ def summarize_paths(paths: Sequence[str | Path]) -> EvaluationSummary:
             files.append(path)
         elif (path / "result.json").is_file():
             files.append(path / "result.json")
+        elif (path / "batch.json").is_file():
+            files.extend(sorted(path.glob("runs/*/*/result.json")))
         else:
             discovered = sorted(path.glob("*/result.json"))
+            discovered.extend(sorted(path.glob("batch-*/runs/*/*/result.json")))
             if not discovered:
                 raise ValueError(f"目录中没有已完成的评测结果。{path}")
             files.extend(discovered)

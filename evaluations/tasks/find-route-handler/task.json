@@ -1,0 +1,21 @@
+{
+  "schema_version": 1,
+  "id": "find-route-handler",
+  "category": "retrieval",
+  "instruction": "从当前路由表追踪 POST /orders 的处理函数。创建 answer.json，字段 file 为处理函数定义所在的 POSIX 相对文件路径，function 为函数名称。保持原有文件不变。",
+  "initial_files": {
+    "app/__init__.py": "",
+    "app/handlers/__init__.py": "",
+    "app/routes.py": "from .handlers.orders import create_order\nfrom .handlers.health import health\nROUTES = {('GET', '/health'): health, ('POST', '/orders'): create_order}\n",
+    "app/handlers/orders.py": "def create_order(payload):\n    return {'id': payload['id'], 'created': True}\n",
+    "app/handlers/health.py": "def health(payload):\n    return {'ok': True}\n",
+    "archive/orders.py": "def create_order_v1(payload):\n    return payload\n"
+  },
+  "verifier": "verify.py",
+  "limits": {
+    "max_iterations": 20,
+    "timeout_seconds": 180,
+    "max_total_tokens": 48000,
+    "verification_timeout_seconds": 30
+  }
+}

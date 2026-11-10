@@ -19,7 +19,7 @@ from timocode.agent.session import SessionStore
 from timocode.agent.session_runtime import AgentSession
 from timocode.agent.state import RunResult
 from timocode.evaluation.metrics import RunMetrics, ToolMetrics, measure_run, read_tool_metrics
-from timocode.evaluation.task import load_task, task_workspace
+from timocode.evaluation.task import EvaluationTask, load_task, task_workspace
 from timocode.llm.base import LLMProvider, ProviderError, ResponseComplete
 from timocode.llm.schemas import DataModel, LLMRequest, Usage
 from timocode.security.permissions import PermissionManager, PermissionRequest
@@ -107,21 +107,16 @@ def _save_json(path: Path, value: DataModel) -> None:
         temporary.unlink(missing_ok=True)
 
 
-async def run_evaluation(
-    manifest: str | Path, provider: LLMProvider, model: str, *,
-    output_directory: str | Path = ".timocode/evaluations",
-    docker_image: str = "python:3.12-slim", trace_secrets: tuple[str, ...] = (),
-) -> EvaluationResult:
-    """独立运行一次任务。调用方管理 Provider 的生命周期。"""
-    if not model.strip():
-        raise ValueError("模型名称不能为空")
-    manifest = Path(manifest).resolve(strict=True)
+def _load_task_inputs(manifest: str | Path) -> tuple[EvaluationTask, bytes]:
     task = load_task(manifest)
     if task.limits.verification_timeout_seconds > 300:
         raise ValueError("当前 Docker 验收后端支持最长 300 秒的验收超时")
-    _, verifier_bytes = Workspace(manifest.parent).read_bytes(task.verifier)
-    verifier_source = verifier_bytes.decode("utf-8")
-    run_id = uuid.uuid4().hex
+    _, verifier_bytes = Workspace(Path(manifest).resolve().parent).read_bytes(task.verifier)
+    verifier_bytes.decode("utf-8")
+    return task, verifier_bytes
+
+
+def _verification_command(verifier_source: str, run_id: str) -> tuple[str, str]:
     completion_marker = f"TIMOCODE_VERIFIER_FINISHED_{run_id}"
     # 完成标记用于区分验收失败和 Docker 创建、启动失败。
     verification_program = (
@@ -134,6 +129,20 @@ async def run_evaluation(
     command = "python -I -c " + shlex.quote(verification_program) + " ."
     if len(command) > 20000:
         raise ValueError("当前验收脚本超出 Docker 命令长度上限")
+    return command, completion_marker
+
+
+async def run_evaluation(
+    manifest: str | Path, provider: LLMProvider, model: str, *,
+    output_directory: str | Path = ".timocode/evaluations",
+    docker_image: str = "python:3.12-slim", trace_secrets: tuple[str, ...] = (),
+) -> EvaluationResult:
+    """独立运行一次任务。调用方管理 Provider 的生命周期。"""
+    if not model.strip():
+        raise ValueError("模型名称不能为空")
+    task, verifier_bytes = _load_task_inputs(manifest)
+    run_id = uuid.uuid4().hex
+    command, completion_marker = _verification_command(verifier_bytes.decode("utf-8"), run_id)
     started = monotonic()
     artifacts = Path(output_directory).resolve() / f"{task.id}-{run_id}"
     artifacts.mkdir(parents=True, exist_ok=False)

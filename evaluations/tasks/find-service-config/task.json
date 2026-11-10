@@ -1,0 +1,19 @@
+{
+  "schema_version": 1,
+  "id": "find-service-config",
+  "category": "retrieval",
+  "instruction": "阅读项目启动代码，找到实际加载的生产服务 host 和 port。创建 answer.json，包含 host、port 和 source 三个字段，source 是配置文件的 POSIX 相对路径。保持原有文件不变。",
+  "initial_files": {
+    "main.py": "from pathlib import Path\nimport tomllib\n\nCONFIG = Path('config/production.toml')\ndef settings():\n    return tomllib.loads(CONFIG.read_text())['service']\n",
+    "config/production.toml": "[service]\nhost = \"internal.local\"\nport = 8087\n",
+    "config/development.toml": "[service]\nhost = \"localhost\"\nport = 8080\n",
+    "README.txt": "旧部署曾经使用端口 9000，请以 main.py 为准。\n"
+  },
+  "verifier": "verify.py",
+  "limits": {
+    "max_iterations": 20,
+    "timeout_seconds": 180,
+    "max_total_tokens": 48000,
+    "verification_timeout_seconds": 30
+  }
+}

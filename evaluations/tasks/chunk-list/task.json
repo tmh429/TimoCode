@@ -1,0 +1,16 @@
+{
+  "schema_version": 1,
+  "id": "chunk-list",
+  "category": "code_change",
+  "instruction": "实现 chunks.py 的 chunk_list(items, size)。items 是列表，按 size 分成新的子列表，末块可不足 size，空输入返回空列表。size 必须为正整数，bool 或非整数抛 TypeError，零或负整数抛 ValueError。不修改输入，子列表为浅复制。",
+  "initial_files": {
+    "chunks.py": "def chunk_list(items, size):\n    raise NotImplementedError\n"
+  },
+  "verifier": "verify.py",
+  "limits": {
+    "max_iterations": 20,
+    "timeout_seconds": 180,
+    "max_total_tokens": 48000,
+    "verification_timeout_seconds": 30
+  }
+}

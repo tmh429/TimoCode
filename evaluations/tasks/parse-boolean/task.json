@@ -1,0 +1,16 @@
+{
+  "schema_version": 1,
+  "id": "parse-boolean",
+  "category": "bug_fix",
+  "instruction": "修复 flags.py 的 parse_bool(text)。忽略字符串两端空白和大小写，true/yes/1/on 返回 True，false/no/0/off 返回 False；其他字符串抛 ValueError。输入约定为字符串，仅使用标准库。",
+  "initial_files": {
+    "flags.py": "def parse_bool(text):\n    return bool(text)\n"
+  },
+  "verifier": "verify.py",
+  "limits": {
+    "max_iterations": 20,
+    "timeout_seconds": 180,
+    "max_total_tokens": 48000,
+    "verification_timeout_seconds": 30
+  }
+}
