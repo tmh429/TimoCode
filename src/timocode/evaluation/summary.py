@@ -9,6 +9,7 @@ from pydantic import Field
 from timocode.evaluation.metrics import ToolCounts, ToolMetrics, measure_run, read_tool_metrics
 from timocode.evaluation.runner import EvaluationResult
 from timocode.llm.schemas import DataModel
+from timocode.security.workspace import Workspace
 
 
 class AggregateMetrics(DataModel):
@@ -100,8 +101,24 @@ def load_result(path: str | Path) -> EvaluationResult:
     return result
 
 
+def _experiment_result_files(directory: Path) -> list[Path]:
+    # 延迟导入避免实验调度与汇总模块的初始化依赖形成环。
+    from timocode.evaluation.batch import BatchResult
+    from timocode.evaluation.experiment import ExperimentResult
+
+    experiment = ExperimentResult.model_validate_json((directory / "experiment.json").read_text(encoding="utf-8"))
+    workspace = Workspace(directory)
+    files = []
+    for reference in experiment.batches:
+        batch_file = workspace.resolve_path(reference.batch_file)
+        batch = BatchResult.model_validate_json(batch_file.read_text(encoding="utf-8"))
+        batch_workspace = Workspace(batch_file.parent)
+        files.extend(batch_workspace.resolve_path(run.result_file) for run in batch.runs)
+    return files
+
+
 def summarize_paths(paths: Sequence[str | Path]) -> EvaluationSummary:
-    """接受结果 JSON、单次产物目录或包含多次运行的父目录。"""
+    """接受结果 JSON、单次、批次、实验目录及其父目录。"""
     files = []
     for value in paths:
         path = Path(value).resolve(strict=True)
@@ -111,9 +128,13 @@ def summarize_paths(paths: Sequence[str | Path]) -> EvaluationSummary:
             files.append(path / "result.json")
         elif (path / "batch.json").is_file():
             files.extend(sorted(path.glob("runs/*/*/result.json")))
+        elif (path / "experiment.json").is_file():
+            files.extend(_experiment_result_files(path))
         else:
             discovered = sorted(path.glob("*/result.json"))
             discovered.extend(sorted(path.glob("batch-*/runs/*/*/result.json")))
+            for index in sorted(path.glob("*/experiment.json")):
+                discovered.extend(_experiment_result_files(index.parent))
             if not discovered:
                 raise ValueError(f"目录中没有已完成的评测结果。{path}")
             files.extend(discovered)

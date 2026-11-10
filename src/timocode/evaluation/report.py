@@ -74,6 +74,10 @@ def compare_experiment(directory: str | Path) -> ComparisonReport:
         if (batch.task_ids != experiment.task_ids or batch.options != variant.options
                 or batch.model != reference.model or batch.state != reference.state):
             raise ValueError("批次任务或配置与实验条件不一致")
+        if variant.model is not None and batch.model != variant.model:
+            raise ValueError("实际模型与计划声明不一致")
+        if batch.state == "completed" and {run.task_id for run in batch.runs} != set(batch.task_ids):
+            raise ValueError("已完成批次缺少计划任务结果")
         if suite_fingerprint(_prepare_tasks([batch_file.parent / "tasks"])) != experiment.suite_sha256:
             raise ValueError("批次使用了不同的任务快照")
         models[variant.name].add(batch.model)
