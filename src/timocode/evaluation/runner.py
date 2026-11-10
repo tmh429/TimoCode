@@ -7,6 +7,7 @@ import json
 from pathlib import Path
 import shlex
 import shutil
+from tempfile import NamedTemporaryFile
 from time import monotonic
 from typing import Literal
 import uuid
@@ -17,6 +18,7 @@ from timocode.agent.loop import DEFAULT_SYSTEM_PROMPT
 from timocode.agent.session import SessionStore
 from timocode.agent.session_runtime import AgentSession
 from timocode.agent.state import RunResult
+from timocode.evaluation.metrics import RunMetrics, ToolMetrics, measure_run, read_tool_metrics
 from timocode.evaluation.task import load_task, task_workspace
 from timocode.llm.base import LLMProvider, ProviderError, ResponseComplete
 from timocode.llm.schemas import DataModel, LLMRequest, Usage
@@ -51,6 +53,7 @@ class EvaluationResult(DataModel):
     error: str | None = None
     artifact_error: str | None = None
     artifact_directory: str
+    metrics: RunMetrics | None = None
 
 
 class _BudgetProvider:
@@ -95,9 +98,13 @@ async def _approve_evaluation(request: PermissionRequest) -> bool:
 
 
 def _save_json(path: Path, value: DataModel) -> None:
-    temporary = path.with_suffix(".tmp")
-    temporary.write_text(value.model_dump_json(indent=2), encoding="utf-8")
-    temporary.replace(path)
+    with NamedTemporaryFile(dir=path.parent, delete=False) as stream:
+        temporary = Path(stream.name)
+    try:
+        temporary.write_text(value.model_dump_json(indent=2), encoding="utf-8")
+        temporary.replace(path)
+    finally:
+        temporary.unlink(missing_ok=True)
 
 
 async def run_evaluation(
@@ -221,5 +228,9 @@ async def run_evaluation(
         if session is not None and session.trace_error:
             result.artifact_error = "。".join(filter(None, [result.artifact_error, session.trace_error]))
         result.elapsed_seconds = monotonic() - started
+        tools = ToolMetrics() if budget.iterations == 0 else None
+        if session is not None and session.trace_path is not None:
+            tools = read_tool_metrics(session.trace_path, session.session_id)
+        result.metrics = measure_run(result, tools)
         _save_json(artifacts / "result.json", result)
     return result

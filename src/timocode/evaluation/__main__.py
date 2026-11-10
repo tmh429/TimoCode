@@ -5,7 +5,8 @@ import asyncio
 import json
 from pathlib import Path
 
-from timocode.evaluation.runner import run_evaluation
+from timocode.evaluation.runner import _save_json, run_evaluation
+from timocode.evaluation.summary import summarize_paths
 from timocode.llm.config import load_settings
 from timocode.llm.provider import OpenAICompatibleProvider
 
@@ -24,13 +25,29 @@ async def _run(arguments: argparse.Namespace) -> int:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="在独立 Docker 工作区执行一个 Coding Task")
-    parser.add_argument("task", type=Path, help="任务 JSON 清单")
+    parser.add_argument("task", type=Path, nargs="?", help="任务 JSON 清单")
     parser.add_argument("--env-file", type=Path, help="模型配置文件")
     parser.add_argument("--docker-image", default="python:3.12-slim", help="本地 Linux Python 镜像")
     parser.add_argument("--output-dir", type=Path, default=Path(".timocode/evaluations"))
+    parser.add_argument("--summarize", type=Path, nargs="+", help="汇总已有结果文件或产物目录")
+    parser.add_argument("--summary-output", type=Path, help="另存汇总 JSON，需要 --summarize")
     arguments = parser.parse_args()
+    if (arguments.task is None) == (arguments.summarize is None):
+        parser.error("请提供任务路径或 --summarize，二者只能选择一个")
+    if arguments.summary_output is not None and arguments.summarize is None:
+        parser.error("--summary-output 需要 --summarize")
     try:
-        code = asyncio.run(_run(arguments))
+        if arguments.summarize is not None:
+            summary = summarize_paths(arguments.summarize)
+            if arguments.summary_output is not None:
+                if arguments.summary_output.exists():
+                    raise ValueError("汇总输出文件已存在，请使用新路径")
+                arguments.summary_output.parent.mkdir(parents=True, exist_ok=True)
+                _save_json(arguments.summary_output, summary)
+            print(json.dumps(summary.model_dump(mode="json"), indent=2))
+            code = 0
+        else:
+            code = asyncio.run(_run(arguments))
     except (KeyboardInterrupt, asyncio.CancelledError):
         parser.exit(130, "评测已取消\n")
     except (ValueError, OSError) as error:
