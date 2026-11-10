@@ -13,6 +13,7 @@ from timocode.evaluation.runner import (
     EvaluationStatus, _load_task_inputs, _save_json, _verification_command, run_evaluation,
 )
 from timocode.evaluation.summary import EvaluationSummary, load_result, summarize_results
+from timocode.evaluation.options import EvaluationOptions
 from timocode.llm.base import LLMProvider
 from timocode.llm.schemas import DataModel
 
@@ -38,6 +39,7 @@ class BatchResult(DataModel):
     summary: EvaluationSummary
     artifact_directory: str
     error: str | None = None
+    options: EvaluationOptions = Field(default_factory=EvaluationOptions)
 
 
 def discover_tasks(paths: Sequence[str | Path]) -> list[Path]:
@@ -58,14 +60,7 @@ def discover_tasks(paths: Sequence[str | Path]) -> list[Path]:
     return manifests
 
 
-async def run_batch(
-    paths: Sequence[str | Path], provider: LLMProvider, model: str, *,
-    output_directory: str | Path = ".timocode/evaluations",
-    docker_image: str = "python:3.12-slim", trace_secrets: tuple[str, ...] = (),
-) -> BatchResult:
-    """普通任务失败后继续，取消和不可保存的异常传播给调用者。"""
-    if not model.strip():
-        raise ValueError("模型名称不能为空")
+def _prepare_tasks(paths: Sequence[str | Path]) -> dict:
     tasks = {}
     for manifest in discover_tasks(paths):
         task, verifier = _load_task_inputs(manifest)
@@ -77,36 +72,64 @@ async def run_batch(
         if task.id in tasks:
             raise ValueError(f"任务 ID 重复。{task.id}")
         tasks[task.id] = (task, verifier)
+    return tasks
+
+
+def _snapshot_tasks(tasks: dict, directory: Path) -> list[Path]:
+    manifests = []
+    for task_id in sorted(tasks):
+        task, verifier = tasks[task_id]
+        destination = directory / task_id
+        destination.mkdir(parents=True)
+        manifest = destination / "task.json"
+        _save_json(manifest, task.model_copy(update={"verifier": "verify.py"}))
+        (destination / "verify.py").write_bytes(verifier)
+        manifests.append(manifest)
+    return manifests
+
+
+async def run_batch(
+    paths: Sequence[str | Path], provider: LLMProvider, model: str, *,
+    output_directory: str | Path = ".timocode/evaluations",
+    docker_image: str = "python:3.12-slim", trace_secrets: tuple[str, ...] = (),
+    options: EvaluationOptions | None = None,
+    _compact_artifacts: bool = False,
+) -> BatchResult:
+    """普通任务失败后继续，取消和不可保存的异常传播给调用者。"""
+    if not model.strip():
+        raise ValueError("模型名称不能为空")
+    options = EvaluationOptions() if options is None else EvaluationOptions.model_validate(options.model_dump())
+    tasks = _prepare_tasks(paths)
     batch_id = uuid.uuid4().hex
-    root = Path(output_directory).resolve() / f"batch-{batch_id}"
+    artifact_id = batch_id[:12] if _compact_artifacts else batch_id
+    root = Path(output_directory).resolve() / f"batch-{artifact_id}"
     root.mkdir(parents=True, exist_ok=False)
     batch = BatchResult(
         batch_id=batch_id, model=model, docker_image=docker_image,
         started_at=datetime.now(timezone.utc).isoformat(), task_ids=sorted(tasks),
         summary=summarize_results([]), artifact_directory=str(root),
+        options=options,
     )
     results = []
     try:
         # 所有任务先落盘，后续评测不依赖源目录的并发修改。
-        for task_id in batch.task_ids:
-            task, verifier = tasks[task_id]
-            destination = root / "tasks" / task_id
-            destination.mkdir(parents=True)
-            _save_json(destination / "task.json", task.model_copy(update={"verifier": "verify.py"}))
-            (destination / "verify.py").write_bytes(verifier)
+        _snapshot_tasks(tasks, root / "tasks")
         _save_json(root / "batch.json", batch)
-        for task_id in batch.task_ids:
+        for task_index, task_id in enumerate(batch.task_ids):
+            run_directory = root / "runs" / (str(task_index) if _compact_artifacts else task_id)
             batch.active_task_id = task_id
             _save_json(root / "batch.json", batch)
             try:
                 await run_evaluation(
                     root / "tasks" / task_id / "task.json", provider, model,
-                    output_directory=root / "runs" / task_id,
+                    output_directory=run_directory,
                     docker_image=batch.image_id or docker_image, trace_secrets=trace_secrets,
+                    options=options,
+                    _compact_artifacts=_compact_artifacts,
                 )
             finally:
                 # 取消时 Runner 仍会写入 cancelled 结果，在传播取消前纳入进度。
-                files = list((root / "runs" / task_id).glob("*/result.json"))
+                files = list(run_directory.glob("*/result.json"))
                 if len(files) == 1:
                     result = load_result(files[0])
                     if batch.image_id is None:

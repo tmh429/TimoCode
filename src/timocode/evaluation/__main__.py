@@ -8,6 +8,8 @@ from pathlib import Path
 from timocode.evaluation.runner import _save_json, run_evaluation
 from timocode.evaluation.batch import run_batch
 from timocode.evaluation.summary import summarize_paths
+from timocode.evaluation.experiment import run_experiment
+from timocode.evaluation.report import write_report
 from timocode.llm.config import load_settings
 from timocode.llm.provider import OpenAICompatibleProvider
 
@@ -36,6 +38,16 @@ async def _run_batch(arguments: argparse.Namespace) -> int:
     return 0 if batch.summary.overall.passed == len(batch.task_ids) else 1
 
 
+async def _run_experiment(arguments: argparse.Namespace) -> int:
+    experiment = await run_experiment(
+        arguments.experiment, env_file=arguments.env_file, output_directory=arguments.output_dir,
+    )
+    report = write_report(experiment.artifact_directory, arguments.report_output)
+    print(json.dumps({"state": experiment.state, "experiment_directory": experiment.artifact_directory,
+                      "report_directory": str(report)}, indent=2))
+    return 0
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Coding Task 的单次、批量评测与离线汇总")
     parser.add_argument("task", type=Path, nargs="?", help="任务 JSON 清单")
@@ -45,11 +57,17 @@ def main() -> None:
     parser.add_argument("--summarize", type=Path, nargs="+", help="汇总已有结果文件或产物目录")
     parser.add_argument("--summary-output", type=Path, help="另存汇总 JSON，需要 --summarize")
     parser.add_argument("--batch", type=Path, nargs="+", help="串行执行任务清单或任务目录")
+    parser.add_argument("--experiment", type=Path, help="运行固定任务快照的对比实验 JSON")
+    parser.add_argument("--report", type=Path, help="从已有实验目录离线生成报告")
+    parser.add_argument("--report-output", type=Path, help="新报告目录，用于 --experiment 或 --report")
     arguments = parser.parse_args()
-    if sum(value is not None for value in (arguments.task, arguments.summarize, arguments.batch)) != 1:
-        parser.error("任务路径、--batch 和 --summarize 必须选择其中一个")
+    if sum(value is not None for value in (arguments.task, arguments.summarize, arguments.batch,
+                                          arguments.experiment, arguments.report)) != 1:
+        parser.error("任务路径、--batch、--summarize、--experiment 和 --report 必须选择其中一个")
     if arguments.summary_output is not None and arguments.summarize is None:
         parser.error("--summary-output 需要 --summarize")
+    if arguments.report_output is not None and arguments.experiment is None and arguments.report is None:
+        parser.error("--report-output 需要 --experiment 或 --report")
     try:
         if arguments.summarize is not None:
             summary = summarize_paths(arguments.summarize)
@@ -60,6 +78,12 @@ def main() -> None:
                 _save_json(arguments.summary_output, summary)
             print(json.dumps(summary.model_dump(mode="json"), indent=2))
             code = 0
+        elif arguments.report is not None:
+            report = write_report(arguments.report, arguments.report_output)
+            print(json.dumps({"report_directory": str(report)}, indent=2))
+            code = 0
+        elif arguments.experiment is not None:
+            code = asyncio.run(_run_experiment(arguments))
         elif arguments.batch is not None:
             code = asyncio.run(_run_batch(arguments))
         else:

@@ -19,6 +19,7 @@ from timocode.agent.session import SessionStore
 from timocode.agent.session_runtime import AgentSession
 from timocode.agent.state import RunResult
 from timocode.evaluation.metrics import RunMetrics, ToolMetrics, measure_run, read_tool_metrics
+from timocode.evaluation.options import EvaluationOptions
 from timocode.evaluation.task import EvaluationTask, load_task, task_workspace
 from timocode.llm.base import LLMProvider, ProviderError, ResponseComplete
 from timocode.llm.schemas import DataModel, LLMRequest, Usage
@@ -54,6 +55,7 @@ class EvaluationResult(DataModel):
     artifact_error: str | None = None
     artifact_directory: str
     metrics: RunMetrics | None = None
+    options: EvaluationOptions = Field(default_factory=EvaluationOptions)
 
 
 class _BudgetProvider:
@@ -136,19 +138,24 @@ async def run_evaluation(
     manifest: str | Path, provider: LLMProvider, model: str, *,
     output_directory: str | Path = ".timocode/evaluations",
     docker_image: str = "python:3.12-slim", trace_secrets: tuple[str, ...] = (),
+    options: EvaluationOptions | None = None,
+    _compact_artifacts: bool = False,
 ) -> EvaluationResult:
     """独立运行一次任务。调用方管理 Provider 的生命周期。"""
     if not model.strip():
         raise ValueError("模型名称不能为空")
+    options = EvaluationOptions() if options is None else EvaluationOptions.model_validate(options.model_dump())
     task, verifier_bytes = _load_task_inputs(manifest)
     run_id = uuid.uuid4().hex
     command, completion_marker = _verification_command(verifier_bytes.decode("utf-8"), run_id)
     started = monotonic()
-    artifacts = Path(output_directory).resolve() / f"{task.id}-{run_id}"
+    artifact_name = "run" if _compact_artifacts else f"{task.id}-{run_id}"
+    artifacts = Path(output_directory).resolve() / artifact_name
     artifacts.mkdir(parents=True, exist_ok=False)
     result = EvaluationResult(
         run_id=run_id, task_id=task.id, model=model, docker_image=docker_image,
         started_at=datetime.now(timezone.utc).isoformat(), artifact_directory=str(artifacts),
+        options=options,
     )
     budget = _BudgetProvider(provider, task.limits.max_total_tokens)
     session = None
@@ -175,15 +182,17 @@ async def run_evaluation(
                         raise RuntimeError("Docker 环境预检失败。" + preflight.content)
                     result.image_id = environment["image_id"]
                     docker.image = result.image_id
+                    agent_tools = tools if options.toolset == "full" else tools[:-1]
                     session = await AgentSession.create(
-                        budget, model, root, store=SessionStore(artifacts / "sessions"), tools=tools,
+                        budget, model, root, store=SessionStore(artifacts / "sessions"), tools=agent_tools,
                         system_prompt=DEFAULT_SYSTEM_PROMPT + (
                             "你正在独立临时项目中完成评测任务。文件修改前先读取 sha256。"
                             "使用 write_file/edit_file 持久修改代码。docker_shell 中的修改随容器退出清理。"
                             "无需请求人工确认。完成任务后简要说明修改。"
                         ),
                         max_iterations=task.limits.max_iterations,
-                        max_tokens=min(4096, task.limits.max_total_tokens),
+                        max_tokens=min(options.max_output_tokens, task.limits.max_total_tokens),
+                        context_budget=options.context_budget,
                         trace_directory=artifacts / "traces", trace_content=True,
                         trace_secrets=trace_secrets,
                     )

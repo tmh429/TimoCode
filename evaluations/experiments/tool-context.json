@@ -1,0 +1,27 @@
+{
+  "schema_version": 1,
+  "name": "tool-context",
+  "tasks": [
+    "../tasks/find-service-config",
+    "../tasks/merge-intervals",
+    "../tasks/chunk-list",
+    "../tasks/config-timeout",
+    "../tasks/test-safe-divide"
+  ],
+  "repeats": 1,
+  "docker_image": "python:3.12-slim",
+  "variants": [
+    {"name": "full-tools"},
+    {"name": "files-only", "options": {"toolset": "files_only"}},
+    {
+      "name": "bounded-context",
+      "options": {
+        "context_budget": {
+          "context_window": 16384,
+          "reserve_output_tokens": 1024,
+          "safety_margin_tokens": 256
+        }
+      }
+    }
+  ]
+}
