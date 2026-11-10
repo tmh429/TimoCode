@@ -1,0 +1,16 @@
+{
+  "schema_version": 1,
+  "id": "merge-intervals",
+  "category": "bug_fix",
+  "instruction": "修复 intervals.py 中的 merge_intervals(intervals)。输入是由两个整数组成的闭区间列表，每个区间满足 start <= end。返回按起点升序排列的合并结果，重叠或端点相同的区间应合并。支持空列表、乱序、嵌套、重复、负数和零长度区间。不得修改输入列表或其中的子列表，返回的子列表也必须与输入独立。保持函数签名不变，仅使用 Python 标准库。",
+  "initial_files": {
+    "intervals.py": "def merge_intervals(intervals):\n    merged = [intervals[0]]\n    for start, end in intervals[1:]:\n        if start < merged[-1][1]:\n            merged[-1][1] = end\n        else:\n            merged.append([start, end])\n    return merged\n"
+  },
+  "verifier": "verify.py",
+  "limits": {
+    "max_iterations": 15,
+    "timeout_seconds": 120,
+    "max_total_tokens": 24000,
+    "verification_timeout_seconds": 15
+  }
+}
